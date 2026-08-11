@@ -202,4 +202,7 @@ func TestReconcileWaitsForFlannelLeaseBeforePublishingRoute(t *testing.T) {
 	if got := pod.Spec.Volumes[0].HostPath.Path; !strings.HasPrefix(got, "/var/lib/test-mesh/connector-") {
 		t.Fatalf("unexpected Mesh state host path %q", got)
 	}
+	if got := pod.Spec.Volumes[2].EmptyDir; got == nil || got.Medium != corev1.StorageMediumMemory {
+		t.Fatalf("expected memory-backed /run/dbus volume, got %#v", got)
+	}
 }

@@ -278,11 +278,13 @@ func (o *Operator) ensureMeshPod(ctx context.Context, node *corev1.Node, connect
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "warp-data", MountPath: "/var/lib/cloudflare-warp"},
 					{Name: "dev-net-tun", MountPath: "/dev/net/tun"},
+					{Name: "run-dbus", MountPath: "/run/dbus"},
 				},
 			}},
 			Volumes: []corev1.Volume{
 				{Name: "warp-data", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: statePath, Type: &directoryOrCreate}}},
 				{Name: "dev-net-tun", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev/net/tun", Type: &charDevice}}},
+				{Name: "run-dbus", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
 			},
 		},
 	}
