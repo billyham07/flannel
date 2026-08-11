@@ -127,6 +127,9 @@ spec:
           value: "5000"
         - name: CONT_WHEN_CACHE_NOT_READY
           value: "false"
+        {{- with .Values.flannel.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         volumeMounts:
         - name: run
           mountPath: /run/flannel

@@ -29,6 +29,9 @@ flannel:
   args:
   - "--ip-masq"
   - "--kube-subnet-mgr"
+  # Extra environment variables for flanneld. This can override the injected
+  # Kubernetes service host when the API is reached through a node underlay.
+  extraEnv: []
   # Backend for kube-flannel. Backend should not be changed
   # at runtime. (vxlan, host-gw, wireguard, udp, cloudflare-mesh)
   # Documentation at https://github.com/flannel-io/flannel/blob/master/Documentation/backends.md
@@ -131,6 +134,7 @@ cloudflareMesh:
     replicas: 2
     syncPeriod: "15s"
     nodeSelector: ""
+    extraEnv: []
     image:
       repository: ""
       tag: ""
