@@ -152,6 +152,12 @@ cloudflareMesh:
       pullPolicy: IfNotPresent
     stateHostPath: /var/lib/cloudflare-mesh
     srcnatEnabled: false
+  coreDNSNodeHosts:
+    enabled: true
+    namespace: kube-system
+    configMapName: coredns
+    dataKey: NodeHosts
+    hostnameSuffix: -mesh
   apiTokenSecret:
     name: cloudflare-mesh-api-token
     key: api-token
@@ -160,6 +166,11 @@ cloudflareMesh:
 The API token Secret must exist in the release namespace before installing the
 chart. Bootstrap Secrets contain connector enrollment tokens and should be
 encrypted at rest. Only the operator holds the account API token.
+
+When `coreDNSNodeHosts.enabled` is true, the operator maintains a marked block
+in the configured CoreDNS hosts file. Each ready Flannel lease contributes its
+Mesh IP under `<node-name><hostnameSuffix>`. Existing entries outside the
+marked block are preserved, and stale Mesh entries are removed automatically.
 
 The Helm chart runs the operator with host networking so it can bootstrap a
 node before CNI is ready. Each Mesh Pod also uses host networking, is pinned to

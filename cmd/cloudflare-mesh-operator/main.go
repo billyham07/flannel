@@ -38,27 +38,32 @@ import (
 )
 
 type options struct {
-	accountID         string
-	apiTokenFile      string
-	apiBaseURL        string
-	kubeconfig        string
-	namespace         string
-	secretPrefix      string
-	clusterName       string
-	connectorPrefix   string
-	annotationPrefix  string
-	nodeSelector      string
-	syncPeriod        time.Duration
-	connectorHA       bool
-	meshPodEnabled    bool
-	meshPodImage      string
-	meshPodPullPolicy string
-	meshPodNamePrefix string
-	meshStateHostPath string
-	meshSRCNATEnabled bool
-	leaderElect       bool
-	leaseName         string
-	leaseNamespace    string
+	accountID               string
+	apiTokenFile            string
+	apiBaseURL              string
+	kubeconfig              string
+	namespace               string
+	secretPrefix            string
+	clusterName             string
+	connectorPrefix         string
+	annotationPrefix        string
+	nodeSelector            string
+	syncPeriod              time.Duration
+	connectorHA             bool
+	meshPodEnabled          bool
+	meshPodImage            string
+	meshPodPullPolicy       string
+	meshPodNamePrefix       string
+	meshStateHostPath       string
+	meshSRCNATEnabled       bool
+	coreDNSNodeHostsEnabled bool
+	coreDNSNamespace        string
+	coreDNSConfigMapName    string
+	coreDNSNodeHostsKey     string
+	coreDNSHostnameSuffix   string
+	leaderElect             bool
+	leaseName               string
+	leaseNamespace          string
 }
 
 func main() {
@@ -94,6 +99,11 @@ func parseFlags() *options {
 	flag.StringVar(&opts.meshPodNamePrefix, "mesh-pod-name-prefix", "cloudflare-mesh-node-", "Per-node Cloudflare Mesh Pod name prefix")
 	flag.StringVar(&opts.meshStateHostPath, "mesh-state-host-path", "/var/lib/cloudflare-mesh", "Host path root for per-connector Cloudflare Mesh registration state")
 	flag.BoolVar(&opts.meshSRCNATEnabled, "mesh-srcnat-enabled", false, "Enable source NAT in containerized Cloudflare Mesh nodes")
+	flag.BoolVar(&opts.coreDNSNodeHostsEnabled, "coredns-node-hosts-enabled", false, "Publish Node Mesh IP hostnames to a CoreDNS NodeHosts ConfigMap")
+	flag.StringVar(&opts.coreDNSNamespace, "coredns-namespace", "kube-system", "Namespace containing the CoreDNS NodeHosts ConfigMap")
+	flag.StringVar(&opts.coreDNSConfigMapName, "coredns-configmap-name", "coredns", "CoreDNS NodeHosts ConfigMap name")
+	flag.StringVar(&opts.coreDNSNodeHostsKey, "coredns-node-hosts-key", "NodeHosts", "Data key containing the CoreDNS hosts file")
+	flag.StringVar(&opts.coreDNSHostnameSuffix, "coredns-hostname-suffix", "-mesh", "Suffix appended to Kubernetes Node names in CoreDNS")
 	flag.BoolVar(&opts.leaderElect, "leader-elect", true, "Enable Kubernetes Lease leader election")
 	flag.StringVar(&opts.leaseName, "leader-election-lease", "cloudflare-mesh-operator", "Leader election Lease name")
 	flag.StringVar(&opts.leaseNamespace, "leader-election-namespace", "kube-flannel", "Leader election Lease namespace")
@@ -130,20 +140,25 @@ func run(ctx context.Context, opts options) error {
 		return fmt.Errorf("invalid --mesh-pod-image-pull-policy %q", opts.meshPodPullPolicy)
 	}
 	operator, err := meshoperator.New(kube, api, meshoperator.Config{
-		Namespace:         opts.namespace,
-		SecretPrefix:      opts.secretPrefix,
-		ClusterName:       opts.clusterName,
-		ConnectorPrefix:   opts.connectorPrefix,
-		AnnotationPrefix:  opts.annotationPrefix,
-		NodeSelector:      opts.nodeSelector,
-		SyncPeriod:        opts.syncPeriod,
-		ConnectorHA:       opts.connectorHA,
-		MeshPodEnabled:    opts.meshPodEnabled,
-		MeshPodImage:      opts.meshPodImage,
-		MeshPodPullPolicy: pullPolicy,
-		MeshPodNamePrefix: opts.meshPodNamePrefix,
-		MeshStateHostPath: opts.meshStateHostPath,
-		MeshSRCNATEnabled: opts.meshSRCNATEnabled,
+		Namespace:               opts.namespace,
+		SecretPrefix:            opts.secretPrefix,
+		ClusterName:             opts.clusterName,
+		ConnectorPrefix:         opts.connectorPrefix,
+		AnnotationPrefix:        opts.annotationPrefix,
+		NodeSelector:            opts.nodeSelector,
+		SyncPeriod:              opts.syncPeriod,
+		ConnectorHA:             opts.connectorHA,
+		MeshPodEnabled:          opts.meshPodEnabled,
+		MeshPodImage:            opts.meshPodImage,
+		MeshPodPullPolicy:       pullPolicy,
+		MeshPodNamePrefix:       opts.meshPodNamePrefix,
+		MeshStateHostPath:       opts.meshStateHostPath,
+		MeshSRCNATEnabled:       opts.meshSRCNATEnabled,
+		CoreDNSNodeHostsEnabled: opts.coreDNSNodeHostsEnabled,
+		CoreDNSNamespace:        opts.coreDNSNamespace,
+		CoreDNSConfigMapName:    opts.coreDNSConfigMapName,
+		CoreDNSNodeHostsKey:     opts.coreDNSNodeHostsKey,
+		CoreDNSHostnameSuffix:   opts.coreDNSHostnameSuffix,
 	})
 	if err != nil {
 		return err

@@ -118,7 +118,11 @@ func TestReconcileBootstrapsNodeEnsuresRouteAndGarbageCollects(t *testing.T) {
 			}},
 		},
 	}
-	kube := fake.NewClientset(node, staleSecret)
+	coreDNS := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "coredns", Namespace: "kube-system"},
+		Data:       map[string]string{"NodeHosts": "192.0.2.10 existing-node\n"},
+	}
+	kube := fake.NewClientset(node, staleSecret, coreDNS)
 	api := &fakeMeshAPI{
 		connectors: map[string]*meshapi.ConnectorCredentials{
 			"flannel-test-old": {ID: "old", Name: "flannel-test-old", Token: "old-token"},
@@ -131,6 +135,7 @@ func TestReconcileBootstrapsNodeEnsuresRouteAndGarbageCollects(t *testing.T) {
 	}
 	op, err := New(kube, api, Config{
 		Namespace: "kube-flannel", SecretPrefix: "mesh-", ClusterName: "test", ConnectorPrefix: "flannel-", SyncPeriod: time.Second,
+		CoreDNSNodeHostsEnabled: true, CoreDNSNamespace: "kube-system", CoreDNSConfigMapName: "coredns", CoreDNSNodeHostsKey: "NodeHosts", CoreDNSHostnameSuffix: "-mesh",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -157,12 +162,51 @@ func TestReconcileBootstrapsNodeEnsuresRouteAndGarbageCollects(t *testing.T) {
 	if len(api.deletedConnectors) != 1 || api.deletedConnectors[0] != "old" {
 		t.Fatalf("unexpected deleted connectors: %#v", api.deletedConnectors)
 	}
+	updatedCoreDNS, err := kube.CoreV1().ConfigMaps("kube-system").Get(context.Background(), "coredns", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNodeHosts := "192.0.2.10 existing-node\n" +
+		nodeHostsBeginMarker + "\n" +
+		"100.96.0.8 node-a-mesh\n" +
+		nodeHostsEndMarker + "\n"
+	if got := updatedCoreDNS.Data["NodeHosts"]; got != wantNodeHosts {
+		t.Fatalf("unexpected CoreDNS NodeHosts:\n%s", got)
+	}
 
 	if err := op.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if api.ensureRoutes != 1 {
 		t.Fatalf("second reconcile created another route")
+	}
+}
+
+func TestMergeManagedNodeHostsReplacesOnlyManagedBlock(t *testing.T) {
+	current := "192.0.2.10 existing-node\n" +
+		nodeHostsBeginMarker + "\n" +
+		"100.96.0.99 stale-mesh\n" +
+		nodeHostsEndMarker + "\n"
+	got, err := mergeManagedNodeHosts(current, map[string]string{
+		"node-b-mesh": "100.96.0.9",
+		"node-a-mesh": "100.96.0.8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "192.0.2.10 existing-node\n" +
+		nodeHostsBeginMarker + "\n" +
+		"100.96.0.8 node-a-mesh\n" +
+		"100.96.0.9 node-b-mesh\n" +
+		nodeHostsEndMarker + "\n"
+	if got != want {
+		t.Fatalf("unexpected merged NodeHosts:\n%s", got)
+	}
+}
+
+func TestMergeManagedNodeHostsRejectsMalformedBlock(t *testing.T) {
+	if _, err := mergeManagedNodeHosts(nodeHostsBeginMarker+"\n100.96.0.8 node-a-mesh\n", nil); err == nil {
+		t.Fatal("expected unmatched managed block marker to fail")
 	}
 }
 

@@ -80,4 +80,31 @@ subjects:
 - kind: ServiceAccount
   name: flannel
   namespace: {{ .Release.Namespace }}
+{{- if .Values.cloudflareMesh.coreDNSNodeHosts.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloudflare-mesh-operator-coredns-nodehosts
+  namespace: {{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: [{{ .Values.cloudflareMesh.coreDNSNodeHosts.configMapName | quote }}]
+  verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloudflare-mesh-operator-coredns-nodehosts
+  namespace: {{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloudflare-mesh-operator-coredns-nodehosts
+subjects:
+- kind: ServiceAccount
+  name: cloudflare-mesh-operator
+  namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}
