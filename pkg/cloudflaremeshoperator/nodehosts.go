@@ -16,6 +16,7 @@ package cloudflaremeshoperator
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
@@ -26,13 +27,15 @@ import (
 )
 
 const (
-	nodeHostsBeginMarker = "# BEGIN cloudflare-mesh-operator"
-	nodeHostsEndMarker   = "# END cloudflare-mesh-operator"
+	nodeHostsBeginMarker    = "# BEGIN cloudflare-mesh-operator"
+	nodeHostsEndMarker      = "# END cloudflare-mesh-operator"
+	nodeHostsHashAnnotation = "cloudflare-mesh.flannel.io/node-hosts-hash"
 )
 
-func (o *Operator) ensureCoreDNSNodeHosts(ctx context.Context, desiredHosts map[string]string) error {
+func (o *Operator) ensureCoreDNSNodeHosts(ctx context.Context, desiredHosts map[string]string) (string, error) {
 	configMaps := o.kube.CoreV1().ConfigMaps(o.cfg.CoreDNSNamespace)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	var rendered string
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		configMap, err := configMaps.Get(ctx, o.cfg.CoreDNSConfigMapName, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("get CoreDNS NodeHosts ConfigMap %s/%s: %w", o.cfg.CoreDNSNamespace, o.cfg.CoreDNSConfigMapName, err)
@@ -42,6 +45,7 @@ func (o *Operator) ensureCoreDNSNodeHosts(ctx context.Context, desiredHosts map[
 		if err != nil {
 			return fmt.Errorf("merge CoreDNS NodeHosts: %w", err)
 		}
+		rendered = desired
 		if current == desired {
 			return nil
 		}
@@ -55,6 +59,51 @@ func (o *Operator) ensureCoreDNSNodeHosts(ctx context.Context, desiredHosts map[
 		}
 		return nil
 	})
+	return rendered, err
+}
+
+func (o *Operator) ensureCoreDNSReload(ctx context.Context, nodeHosts string) error {
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(nodeHosts)))
+	switch o.cfg.CoreDNSRolloutKind {
+	case "deployment":
+		deployments := o.kube.AppsV1().Deployments(o.cfg.CoreDNSNamespace)
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			deployment, err := deployments.Get(ctx, o.cfg.CoreDNSRolloutName, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("get CoreDNS Deployment %s/%s: %w", o.cfg.CoreDNSNamespace, o.cfg.CoreDNSRolloutName, err)
+			}
+			if deployment.Spec.Template.Annotations[nodeHostsHashAnnotation] == hash {
+				return nil
+			}
+			deployment = deployment.DeepCopy()
+			if deployment.Spec.Template.Annotations == nil {
+				deployment.Spec.Template.Annotations = make(map[string]string)
+			}
+			deployment.Spec.Template.Annotations[nodeHostsHashAnnotation] = hash
+			_, err = deployments.Update(ctx, deployment, metav1.UpdateOptions{})
+			return err
+		})
+	case "daemonset":
+		daemonSets := o.kube.AppsV1().DaemonSets(o.cfg.CoreDNSNamespace)
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			daemonSet, err := daemonSets.Get(ctx, o.cfg.CoreDNSRolloutName, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("get CoreDNS DaemonSet %s/%s: %w", o.cfg.CoreDNSNamespace, o.cfg.CoreDNSRolloutName, err)
+			}
+			if daemonSet.Spec.Template.Annotations[nodeHostsHashAnnotation] == hash {
+				return nil
+			}
+			daemonSet = daemonSet.DeepCopy()
+			if daemonSet.Spec.Template.Annotations == nil {
+				daemonSet.Spec.Template.Annotations = make(map[string]string)
+			}
+			daemonSet.Spec.Template.Annotations[nodeHostsHashAnnotation] = hash
+			_, err = daemonSets.Update(ctx, daemonSet, metav1.UpdateOptions{})
+			return err
+		})
+	default:
+		return fmt.Errorf("unsupported CoreDNS rollout kind %q", o.cfg.CoreDNSRolloutKind)
+	}
 }
 
 func mergeManagedNodeHosts(current string, desiredHosts map[string]string) (string, error) {

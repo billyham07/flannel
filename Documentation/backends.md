@@ -158,6 +158,8 @@ cloudflareMesh:
     configMapName: coredns
     dataKey: NodeHosts
     hostnameSuffix: -mesh
+    rolloutKind: deployment
+    rolloutName: coredns
   apiTokenSecret:
     name: cloudflare-mesh-api-token
     key: api-token
@@ -171,6 +173,9 @@ When `coreDNSNodeHosts.enabled` is true, the operator maintains a marked block
 in the configured CoreDNS hosts file. Each ready Flannel lease contributes its
 Mesh IP under `<node-name><hostnameSuffix>`. Existing entries outside the
 marked block are preserved, and stale Mesh entries are removed automatically.
+Because ConfigMaps mounted with `subPath` do not receive live updates, the
+operator also updates a content-hash annotation on the configured CoreDNS
+Deployment or DaemonSet so that each hosts-file change triggers one rollout.
 
 The Helm chart runs the operator with host networking so it can bootstrap a
 node before CNI is ready. Each Mesh Pod also uses host networking, is pinned to

@@ -50,6 +50,8 @@ spec:
         - --coredns-configmap-name={{ .Values.cloudflareMesh.coreDNSNodeHosts.configMapName }}
         - --coredns-node-hosts-key={{ .Values.cloudflareMesh.coreDNSNodeHosts.dataKey }}
         - --coredns-hostname-suffix={{ .Values.cloudflareMesh.coreDNSNodeHosts.hostnameSuffix }}
+        - --coredns-rollout-kind={{ .Values.cloudflareMesh.coreDNSNodeHosts.rolloutKind }}
+        - --coredns-rollout-name={{ .Values.cloudflareMesh.coreDNSNodeHosts.rolloutName }}
         {{- if .Values.cloudflareMesh.operator.nodeSelector }}
         - --node-selector={{ .Values.cloudflareMesh.operator.nodeSelector }}
         {{- end }}

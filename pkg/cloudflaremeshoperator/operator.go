@@ -56,6 +56,8 @@ type Config struct {
 	CoreDNSConfigMapName    string
 	CoreDNSNodeHostsKey     string
 	CoreDNSHostnameSuffix   string
+	CoreDNSRolloutKind      string
+	CoreDNSRolloutName      string
 }
 
 type Operator struct {
@@ -92,11 +94,15 @@ func New(kube kubernetes.Interface, api meshapi.API, cfg Config) (*Operator, err
 		}
 	}
 	if cfg.CoreDNSNodeHostsEnabled {
-		if cfg.CoreDNSNamespace == "" || cfg.CoreDNSConfigMapName == "" || cfg.CoreDNSNodeHostsKey == "" {
-			return nil, errors.New("CoreDNS namespace, ConfigMap name, and NodeHosts key are required when NodeHosts sync is enabled")
+		if cfg.CoreDNSNamespace == "" || cfg.CoreDNSConfigMapName == "" || cfg.CoreDNSNodeHostsKey == "" || cfg.CoreDNSRolloutName == "" {
+			return nil, errors.New("CoreDNS namespace, ConfigMap name, NodeHosts key, and rollout workload name are required when NodeHosts sync is enabled")
 		}
 		if cfg.CoreDNSHostnameSuffix == "" {
 			cfg.CoreDNSHostnameSuffix = "-mesh"
+		}
+		cfg.CoreDNSRolloutKind = strings.ToLower(cfg.CoreDNSRolloutKind)
+		if cfg.CoreDNSRolloutKind != "deployment" && cfg.CoreDNSRolloutKind != "daemonset" {
+			return nil, fmt.Errorf("CoreDNS rollout kind must be deployment or daemonset, got %q", cfg.CoreDNSRolloutKind)
 		}
 	}
 	return &Operator{kube: kube, api: api, cfg: cfg}, nil
@@ -184,7 +190,10 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 		desiredRoutes[routeKey(route.TunnelID, route.Network)] = struct{}{}
 	}
 	if len(reconcileErrors) == 0 && o.cfg.CoreDNSNodeHostsEnabled {
-		if err := o.ensureCoreDNSNodeHosts(ctx, desiredNodeHosts); err != nil {
+		nodeHosts, err := o.ensureCoreDNSNodeHosts(ctx, desiredNodeHosts)
+		if err != nil {
+			reconcileErrors = append(reconcileErrors, err)
+		} else if err := o.ensureCoreDNSReload(ctx, nodeHosts); err != nil {
 			reconcileErrors = append(reconcileErrors, err)
 		}
 	}
