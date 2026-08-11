@@ -61,6 +61,8 @@ type options struct {
 	coreDNSConfigMapName    string
 	coreDNSNodeHostsKey     string
 	coreDNSHostnameSuffix   string
+	coreDNSRolloutKind      string
+	coreDNSRolloutName      string
 	leaderElect             bool
 	leaseName               string
 	leaseNamespace          string
@@ -104,6 +106,8 @@ func parseFlags() *options {
 	flag.StringVar(&opts.coreDNSConfigMapName, "coredns-configmap-name", "coredns", "CoreDNS NodeHosts ConfigMap name")
 	flag.StringVar(&opts.coreDNSNodeHostsKey, "coredns-node-hosts-key", "NodeHosts", "Data key containing the CoreDNS hosts file")
 	flag.StringVar(&opts.coreDNSHostnameSuffix, "coredns-hostname-suffix", "-mesh", "Suffix appended to Kubernetes Node names in CoreDNS")
+	flag.StringVar(&opts.coreDNSRolloutKind, "coredns-rollout-kind", "deployment", "CoreDNS workload kind to restart after NodeHosts changes (deployment or daemonset)")
+	flag.StringVar(&opts.coreDNSRolloutName, "coredns-rollout-name", "coredns", "CoreDNS workload name to restart after NodeHosts changes")
 	flag.BoolVar(&opts.leaderElect, "leader-elect", true, "Enable Kubernetes Lease leader election")
 	flag.StringVar(&opts.leaseName, "leader-election-lease", "cloudflare-mesh-operator", "Leader election Lease name")
 	flag.StringVar(&opts.leaseNamespace, "leader-election-namespace", "kube-flannel", "Leader election Lease namespace")
@@ -159,6 +163,8 @@ func run(ctx context.Context, opts options) error {
 		CoreDNSConfigMapName:    opts.coreDNSConfigMapName,
 		CoreDNSNodeHostsKey:     opts.coreDNSNodeHostsKey,
 		CoreDNSHostnameSuffix:   opts.coreDNSHostnameSuffix,
+		CoreDNSRolloutKind:      opts.coreDNSRolloutKind,
+		CoreDNSRolloutName:      opts.coreDNSRolloutName,
 	})
 	if err != nil {
 		return err

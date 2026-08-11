@@ -22,6 +22,7 @@ import (
 	"time"
 
 	meshapi "github.com/flannel-io/flannel/pkg/cloudflaremesh"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -122,7 +123,8 @@ func TestReconcileBootstrapsNodeEnsuresRouteAndGarbageCollects(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "coredns", Namespace: "kube-system"},
 		Data:       map[string]string{"NodeHosts": "192.0.2.10 existing-node\n"},
 	}
-	kube := fake.NewClientset(node, staleSecret, coreDNS)
+	coreDNSDaemonSet := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "coredns", Namespace: "kube-system"}}
+	kube := fake.NewClientset(node, staleSecret, coreDNS, coreDNSDaemonSet)
 	api := &fakeMeshAPI{
 		connectors: map[string]*meshapi.ConnectorCredentials{
 			"flannel-test-old": {ID: "old", Name: "flannel-test-old", Token: "old-token"},
@@ -135,7 +137,7 @@ func TestReconcileBootstrapsNodeEnsuresRouteAndGarbageCollects(t *testing.T) {
 	}
 	op, err := New(kube, api, Config{
 		Namespace: "kube-flannel", SecretPrefix: "mesh-", ClusterName: "test", ConnectorPrefix: "flannel-", SyncPeriod: time.Second,
-		CoreDNSNodeHostsEnabled: true, CoreDNSNamespace: "kube-system", CoreDNSConfigMapName: "coredns", CoreDNSNodeHostsKey: "NodeHosts", CoreDNSHostnameSuffix: "-mesh",
+		CoreDNSNodeHostsEnabled: true, CoreDNSNamespace: "kube-system", CoreDNSConfigMapName: "coredns", CoreDNSNodeHostsKey: "NodeHosts", CoreDNSHostnameSuffix: "-mesh", CoreDNSRolloutKind: "daemonset", CoreDNSRolloutName: "coredns",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +174,13 @@ func TestReconcileBootstrapsNodeEnsuresRouteAndGarbageCollects(t *testing.T) {
 		nodeHostsEndMarker + "\n"
 	if got := updatedCoreDNS.Data["NodeHosts"]; got != wantNodeHosts {
 		t.Fatalf("unexpected CoreDNS NodeHosts:\n%s", got)
+	}
+	updatedDaemonSet, err := kube.AppsV1().DaemonSets("kube-system").Get(context.Background(), "coredns", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedDaemonSet.Spec.Template.Annotations[nodeHostsHashAnnotation] == "" {
+		t.Fatal("CoreDNS DaemonSet did not receive the NodeHosts content hash")
 	}
 
 	if err := op.Reconcile(context.Background()); err != nil {

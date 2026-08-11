@@ -159,3 +159,5 @@ cloudflareMesh:
     configMapName: "coredns"
     dataKey: "NodeHosts"
     hostnameSuffix: "-mesh"
+    rolloutKind: "deployment"
+    rolloutName: "coredns"
