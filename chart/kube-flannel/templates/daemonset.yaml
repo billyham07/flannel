@@ -26,7 +26,7 @@ spec:
                 values:
                 - linux
       hostNetwork: true
-      {{- if .Values.cloudflareMesh.enabled }}
+      {{- if and .Values.cloudflareMesh.enabled (not .Values.cloudflareMesh.meshPod.enabled) }}
       hostPID: true
       {{- end }}
       priorityClassName: system-node-critical
@@ -101,7 +101,7 @@ spec:
           {{- end }}
         {{- end }}
         securityContext:
-          {{- if .Values.cloudflareMesh.enabled }}
+          {{- if and .Values.cloudflareMesh.enabled (not .Values.cloudflareMesh.meshPod.enabled) }}
           privileged: true
           {{- else }}
           privileged: false
@@ -137,7 +137,7 @@ spec:
           mountPath: /etc/kube-flannel/
         - name: xtables-lock
           mountPath: /run/xtables.lock
-        {{- if .Values.cloudflareMesh.enabled }}
+        {{- if and .Values.cloudflareMesh.enabled (not .Values.cloudflareMesh.meshPod.enabled) }}
         - name: cloudflare-mesh-state
           mountPath: /var/lib/flannel/cloudflare-mesh
         {{- end }}
@@ -189,7 +189,7 @@ spec:
         hostPath:
           path: /run/xtables.lock
           type: FileOrCreate
-      {{- if .Values.cloudflareMesh.enabled }}
+      {{- if and .Values.cloudflareMesh.enabled (not .Values.cloudflareMesh.meshPod.enabled) }}
       - name: cloudflare-mesh-state
         hostPath:
           path: {{ .Values.cloudflareMesh.stateHostPath }}

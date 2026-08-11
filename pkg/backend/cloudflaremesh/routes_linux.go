@@ -17,12 +17,16 @@
 package cloudflaremesh
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sort"
+	"time"
 
 	"github.com/vishvananda/netlink"
 )
+
+const routeManagerPollInterval = 500 * time.Millisecond
 
 type localRouteManager interface {
 	Ensure(network string) error
@@ -65,6 +69,27 @@ func newLocalRouteManager(cfg *runtimeConfig) (*netlinkRouteManager, error) {
 		mtu:      link.Attrs().MTU,
 		table:    table,
 	}, nil
+}
+
+func waitForLocalRouteManager(ctx context.Context, cfg *runtimeConfig) (*netlinkRouteManager, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, cfg.ConnectWait)
+	defer cancel()
+
+	var lastErr error
+	ticker := time.NewTicker(routeManagerPollInterval)
+	defer ticker.Stop()
+	for {
+		manager, err := newLocalRouteManager(cfg)
+		if err == nil {
+			return manager, nil
+		}
+		lastErr = err
+		select {
+		case <-waitCtx.Done():
+			return nil, fmt.Errorf("wait for external Cloudflare Mesh interface: %w: %v", waitCtx.Err(), lastErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (m *netlinkRouteManager) Ensure(network string) error {

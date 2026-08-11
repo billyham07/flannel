@@ -31,6 +31,7 @@ const (
 	defaultSecretPrefix    = "cloudflare-mesh-node-"
 	defaultStateFile       = "/var/lib/flannel/cloudflare-mesh/state.json"
 	defaultWARPCLI         = "warp-cli"
+	defaultWARPMode        = "host-cli"
 	defaultWARPInterface   = "CloudflareWARP"
 	defaultMeshCIDR        = "100.96.0.0/12"
 	defaultConnectTimeout  = 45 * time.Second
@@ -57,6 +58,7 @@ type config struct {
 	StateFile                 string   `json:"StateFile"`
 	WARPCLI                   string   `json:"WARPCLI"`
 	WARPCLIArgs               []string `json:"WARPCLIArgs"`
+	WARPMode                  string   `json:"WARPMode"`
 	WARPInterface             string   `json:"WARPInterface"`
 	MeshCIDR                  string   `json:"MeshCIDR"`
 	RouteTable                int      `json:"RouteTable"`
@@ -81,6 +83,7 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 		OperatorSecretPrefix: defaultSecretPrefix,
 		StateFile:            defaultStateFile,
 		WARPCLI:              defaultWARPCLI,
+		WARPMode:             defaultWARPMode,
 		WARPInterface:        defaultWARPInterface,
 		MeshCIDR:             defaultMeshCIDR,
 	}
@@ -92,6 +95,9 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 
 	if cfg.ControlPlaneMode != "operator" && cfg.ControlPlaneMode != "direct" {
 		return nil, fmt.Errorf("ControlPlaneMode must be operator or direct, got %q", cfg.ControlPlaneMode)
+	}
+	if cfg.WARPMode != "host-cli" && cfg.WARPMode != "external" {
+		return nil, fmt.Errorf("WARPMode must be host-cli or external, got %q", cfg.WARPMode)
 	}
 
 	if cfg.NodeName == "" {

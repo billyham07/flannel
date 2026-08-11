@@ -17,6 +17,7 @@ package cloudflaremeshoperator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,7 @@ func TestReconcileWaitsForFlannelLeaseBeforePublishingRoute(t *testing.T) {
 	api := &fakeMeshAPI{connectors: make(map[string]*meshapi.ConnectorCredentials)}
 	op, err := New(kube, api, Config{
 		Namespace: "kube-flannel", SecretPrefix: "mesh-", ClusterName: "test", ConnectorPrefix: "flannel-",
+		MeshPodEnabled: true, MeshPodImage: "cloudflare/mesh:test", MeshStateHostPath: "/var/lib/test-mesh",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -183,5 +185,21 @@ func TestReconcileWaitsForFlannelLeaseBeforePublishingRoute(t *testing.T) {
 	}
 	if _, err := kube.CoreV1().Secrets("kube-flannel").Get(context.Background(), "mesh-node-b", metav1.GetOptions{}); err != nil {
 		t.Fatal(err)
+	}
+	pod, err := kube.CoreV1().Pods("kube-flannel").Get(context.Background(), "mesh-node-b", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pod.Spec.HostNetwork || pod.Spec.NodeName != "node-b" {
+		t.Fatalf("Mesh Pod is not pinned to the host network on node-b: %#v", pod.Spec)
+	}
+	if got := pod.Spec.Containers[0].Image; got != "cloudflare/mesh:test" {
+		t.Fatalf("unexpected Mesh Pod image %q", got)
+	}
+	if got := pod.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name; got != "mesh-node-b" {
+		t.Fatalf("Mesh Pod uses unexpected token Secret %q", got)
+	}
+	if got := pod.Spec.Volumes[0].HostPath.Path; !strings.HasPrefix(got, "/var/lib/test-mesh/connector-") {
+		t.Fatalf("unexpected Mesh state host path %q", got)
 	}
 }

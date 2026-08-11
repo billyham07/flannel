@@ -88,20 +88,20 @@ Type:
 
 ### Cloudflare Mesh
 
-Cloudflare Mesh uses a Cloudflare One Client on every node as the encrypted
-transport for Flannel node subnets. The `cloudflare-mesh-operator` creates a
-Mesh connector for each Kubernetes Node, publishes that node's PodCIDR through
-the Cloudflare route API, and removes routes owned by deleted nodes. The node
-backend enrolls the host client and reconciles routes for remote Flannel leases
-in the Cloudflare WARP policy routing table.
+Cloudflare Mesh uses the official `cloudflare/mesh` container on every node as
+the encrypted transport for Flannel node subnets. The
+`cloudflare-mesh-operator` creates a Mesh connector, bootstrap Secret, and
+host-networked Mesh Pod for each Kubernetes Node. It publishes that node's
+PodCIDR through the Cloudflare route API and removes resources owned by deleted
+nodes. The node backend waits for the `CloudflareWARP` interface and reconciles
+routes for remote Flannel leases in its Linux policy routing table.
 
 This backend is currently IPv4-only.
 
 Requirements:
 
-* Install and enable the Cloudflare One Client (`warp-svc`) on every node. The
-  backend manages connector enrollment, connection, and routing, but does not
-  install host operating-system packages.
+* Nodes must provide `/dev/net/tun` and allow the Mesh Pod the `NET_ADMIN` and
+  `NET_RAW` capabilities. No host Cloudflare One Client package is required.
 * Configure the Cloudflare account for Mesh connectivity and create an API
   token with `Cloudflare One Networks Write` and `Cloudflare One Connectors
   Write` (or `Cloudflare One Connector: WARP Write`) permissions.
@@ -121,8 +121,7 @@ Backend configuration:
     "ControlPlaneMode": "operator",
     "OperatorNamespace": "kube-flannel",
     "OperatorSecretPrefix": "cloudflare-mesh-node-",
-    "WARPCLI": "nsenter",
-    "WARPCLIArgs": ["-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "warp-cli"],
+    "WARPMode": "external",
     "WARPInterface": "CloudflareWARP",
     "MeshCIDR": "100.96.0.0/12",
     "RouteTable": 0
@@ -144,6 +143,15 @@ cloudflareMesh:
   enabled: true
   accountID: 0123456789abcdef0123456789abcdef
   clusterName: production
+  meshPod:
+    enabled: true
+    image:
+      repository: cloudflare/mesh
+      tag: latest
+      digest: ""
+      pullPolicy: IfNotPresent
+    stateHostPath: /var/lib/cloudflare-mesh
+    srcnatEnabled: false
   apiTokenSecret:
     name: cloudflare-mesh-api-token
     key: api-token
@@ -154,10 +162,17 @@ chart. Bootstrap Secrets contain connector enrollment tokens and should be
 encrypted at rest. Only the operator holds the account API token.
 
 The Helm chart runs the operator with host networking so it can bootstrap a
-node before CNI is ready. In Cloudflare Mesh mode, the Flannel container is
-privileged and enters the host namespaces to call the host-installed
-`warp-cli`; other backends retain the chart's normal capability-only security
-context.
+node before CNI is ready. Each Mesh Pod also uses host networking, is pinned to
+one node, persists its registration below `meshPod.stateHostPath`, and reads
+only that node's connector token. Flannel itself retains the chart's normal
+capability-only security context. Set `meshPod.srcnatEnabled: false` when every
+PodCIDR is published through Cloudflare Mesh and Pod source addresses must be
+preserved.
+
+For compatibility with host-installed Cloudflare One Client deployments, set
+`meshPod.enabled: false` and configure `WARPMode: host-cli`. That legacy mode
+uses `warp-cli` for enrollment and requires the Flannel container to enter the
+host namespaces.
 
 ### TencentCloud VPC
 
