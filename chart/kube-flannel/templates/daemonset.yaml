@@ -101,14 +101,15 @@ spec:
           {{- end }}
         {{- end }}
         securityContext:
+          {{- if .Values.cloudflareMesh.enabled }}
+          privileged: true
+          {{- else }}
           privileged: false
           capabilities:
             add:
             - NET_ADMIN
             - NET_RAW
-            {{- if .Values.cloudflareMesh.enabled }}
-            - SYS_ADMIN
-            {{- end }}
+          {{- end }}
         env:
         - name: POD_NAME
           valueFrom:

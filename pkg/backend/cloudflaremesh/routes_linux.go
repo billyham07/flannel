@@ -33,9 +33,10 @@ type localRouteManager interface {
 }
 
 type netlinkRouteManager struct {
-	link   netlink.Link
-	meshIP net.IP
-	table  int
+	linkName string
+	meshIP   net.IP
+	mtu      int
+	table    int
 }
 
 func newLocalRouteManager(cfg *runtimeConfig) (*netlinkRouteManager, error) {
@@ -58,16 +59,25 @@ func newLocalRouteManager(cfg *runtimeConfig) (*netlinkRouteManager, error) {
 			return nil, err
 		}
 	}
-	return &netlinkRouteManager{link: link, meshIP: meshIP, table: table}, nil
+	return &netlinkRouteManager{
+		linkName: link.Attrs().Name,
+		meshIP:   meshIP,
+		mtu:      link.Attrs().MTU,
+		table:    table,
+	}, nil
 }
 
 func (m *netlinkRouteManager) Ensure(network string) error {
+	link, err := netlink.LinkByName(m.linkName)
+	if err != nil {
+		return fmt.Errorf("refresh WARP interface %q: %w", m.linkName, err)
+	}
 	dst, err := parseCIDR(network)
 	if err != nil {
 		return err
 	}
 	route := netlink.Route{
-		LinkIndex: m.link.Attrs().Index,
+		LinkIndex: link.Attrs().Index,
 		Scope:     netlink.SCOPE_LINK,
 		Dst:       dst,
 		Table:     m.table,
@@ -79,6 +89,10 @@ func (m *netlinkRouteManager) Ensure(network string) error {
 }
 
 func (m *netlinkRouteManager) Remove(network string) error {
+	link, err := netlink.LinkByName(m.linkName)
+	if err != nil {
+		return fmt.Errorf("refresh WARP interface %q: %w", m.linkName, err)
+	}
 	dst, err := parseCIDR(network)
 	if err != nil {
 		return err
@@ -89,7 +103,7 @@ func (m *netlinkRouteManager) Remove(network string) error {
 		return fmt.Errorf("list WARP route %s in table %d: %w", network, m.table, err)
 	}
 	for i := range routes {
-		if routes[i].LinkIndex != m.link.Attrs().Index {
+		if routes[i].LinkIndex != link.Attrs().Index {
 			continue
 		}
 		if err := netlink.RouteDel(&routes[i]); err != nil {
@@ -100,7 +114,7 @@ func (m *netlinkRouteManager) Remove(network string) error {
 }
 
 func (m *netlinkRouteManager) MeshIP() net.IP { return append(net.IP(nil), m.meshIP...) }
-func (m *netlinkRouteManager) MTU() int       { return m.link.Attrs().MTU }
+func (m *netlinkRouteManager) MTU() int       { return m.mtu }
 func (m *netlinkRouteManager) Table() int     { return m.table }
 
 func detectWARPRouteTable(link netlink.Link, meshNetwork *net.IPNet) (int, error) {

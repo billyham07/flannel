@@ -92,8 +92,10 @@ func (w *warpClient) EnsureRegisteredAndConnected(ctx context.Context, connector
 	}
 
 	if !registered {
-		if _, err := w.run(ctx, "--accept-tos", "connector", "new", connector.Token); err != nil {
-			return fmt.Errorf("register WARP connector %s: %w", connector.ID, err)
+		output, err := w.run(ctx, "--accept-tos", "connector", "new", connector.Token)
+		if err != nil {
+			output = strings.ReplaceAll(output, connector.Token, "[REDACTED]")
+			return fmt.Errorf("register WARP connector %s: %w: %s", connector.ID, err, output)
 		}
 		if err := w.writeState(&warpState{ConnectorID: connector.ID, ConnectorName: connector.Name}); err != nil {
 			return err
