@@ -63,10 +63,12 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 	if err != nil {
 		return nil, err
 	}
-	if err := newWARPClient(cfg).EnsureRegisteredAndConnected(ctx, connector, cfg.AdoptExistingRegistration); err != nil {
-		return nil, err
+	if cfg.WARPMode == "host-cli" {
+		if err := newWARPClient(cfg).EnsureRegisteredAndConnected(ctx, connector, cfg.AdoptExistingRegistration); err != nil {
+			return nil, err
+		}
 	}
-	routes, err := newLocalRouteManager(cfg)
+	routes, err := waitForLocalRouteManager(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

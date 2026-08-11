@@ -16,11 +16,14 @@ package cloudflaremeshoperator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"path"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,14 +37,20 @@ import (
 )
 
 type Config struct {
-	Namespace        string
-	SecretPrefix     string
-	ClusterName      string
-	ConnectorPrefix  string
-	AnnotationPrefix string
-	NodeSelector     string
-	SyncPeriod       time.Duration
-	ConnectorHA      bool
+	Namespace         string
+	SecretPrefix      string
+	ClusterName       string
+	ConnectorPrefix   string
+	AnnotationPrefix  string
+	NodeSelector      string
+	SyncPeriod        time.Duration
+	ConnectorHA       bool
+	MeshPodEnabled    bool
+	MeshPodImage      string
+	MeshPodPullPolicy corev1.PullPolicy
+	MeshPodNamePrefix string
+	MeshStateHostPath string
+	MeshSRCNATEnabled bool
 }
 
 type Operator struct {
@@ -62,6 +71,20 @@ func New(kube kubernetes.Interface, api meshapi.API, cfg Config) (*Operator, err
 	}
 	if cfg.SyncPeriod <= 0 {
 		cfg.SyncPeriod = 15 * time.Second
+	}
+	if cfg.MeshPodEnabled {
+		if cfg.MeshPodImage == "" {
+			return nil, errors.New("Mesh Pod image is required when Mesh Pod management is enabled")
+		}
+		if cfg.MeshPodPullPolicy == "" {
+			cfg.MeshPodPullPolicy = corev1.PullIfNotPresent
+		}
+		if cfg.MeshPodNamePrefix == "" {
+			cfg.MeshPodNamePrefix = cfg.SecretPrefix
+		}
+		if cfg.MeshStateHostPath == "" {
+			cfg.MeshStateHostPath = "/var/lib/cloudflare-mesh"
+		}
 	}
 	return &Operator{kube: kube, api: api, cfg: cfg}, nil
 }
@@ -88,6 +111,7 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 
 	desiredRoutes := make(map[string]struct{})
 	desiredConnectors := make(map[string]struct{})
+	desiredPods := make(map[string]struct{})
 	var reconcileErrors []error
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
@@ -101,6 +125,14 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 		if err := o.ensureBootstrapSecret(ctx, node, connector); err != nil {
 			reconcileErrors = append(reconcileErrors, err)
 			continue
+		}
+		if o.cfg.MeshPodEnabled {
+			podName := meshapi.NodePodName(o.cfg.MeshPodNamePrefix, node.Name)
+			desiredPods[podName] = struct{}{}
+			if err := o.ensureMeshPod(ctx, node, connector); err != nil {
+				reconcileErrors = append(reconcileErrors, err)
+				continue
+			}
 		}
 
 		backendType := node.Annotations[o.cfg.AnnotationPrefix+"/backend-type"]
@@ -128,6 +160,26 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 			continue
 		}
 		desiredRoutes[routeKey(route.TunnelID, route.Network)] = struct{}{}
+	}
+	if len(reconcileErrors) > 0 {
+		return errors.Join(reconcileErrors...)
+	}
+	if o.cfg.MeshPodEnabled {
+		selector := meshapi.ManagedByLabel + "=" + meshapi.ManagedByOperator + "," +
+			meshapi.MeshPodComponentLabel + "=" + meshapi.MeshPodComponent
+		pods, err := o.kube.CoreV1().Pods(o.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			return fmt.Errorf("list managed Mesh Pods: %w", err)
+		}
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if _, ok := desiredPods[pod.Name]; ok {
+				continue
+			}
+			if err := o.kube.CoreV1().Pods(o.cfg.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("delete stale Mesh Pod %s/%s: %w", pod.Namespace, pod.Name, err))
+			}
+		}
 	}
 	if len(reconcileErrors) > 0 {
 		return errors.Join(reconcileErrors...)
@@ -172,6 +224,114 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 		}
 	}
 	return errors.Join(reconcileErrors...)
+}
+
+func (o *Operator) ensureMeshPod(ctx context.Context, node *corev1.Node, connector *meshapi.ConnectorCredentials) error {
+	podName := meshapi.NodePodName(o.cfg.MeshPodNamePrefix, node.Name)
+	secretName := meshapi.NodeSecretName(o.cfg.SecretPrefix, node.Name)
+	statePath := path.Join(o.cfg.MeshStateHostPath, meshapi.ConnectorStateDirectory(connector.ID))
+	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "Node", Name: node.Name, UID: node.UID}
+	revision := meshPodRevision(o.cfg, node.Name, connector.ID, secretName, statePath)
+	automount := false
+	allowPrivilegeEscalation := false
+	runAsUser := int64(0)
+	directoryOrCreate := corev1.HostPathDirectoryOrCreate
+	charDevice := corev1.HostPathCharDev
+	desiredLabels := map[string]string{
+		meshapi.ManagedByLabel:        meshapi.ManagedByOperator,
+		meshapi.MeshPodComponentLabel: meshapi.MeshPodComponent,
+		"app.kubernetes.io/name":      "cloudflare-mesh",
+	}
+	desired := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            podName,
+			Namespace:       o.cfg.Namespace,
+			Labels:          desiredLabels,
+			Annotations:     map[string]string{meshapi.ConnectorIDAnnotation: connector.ID, "cloudflare-mesh.flannel.io/revision": revision},
+			OwnerReferences: []metav1.OwnerReference{owner},
+		},
+		Spec: corev1.PodSpec{
+			NodeName:                     node.Name,
+			HostNetwork:                  true,
+			DNSPolicy:                    corev1.DNSClusterFirstWithHostNet,
+			PriorityClassName:            "system-node-critical",
+			RestartPolicy:                corev1.RestartPolicyAlways,
+			AutomountServiceAccountToken: &automount,
+			EnableServiceLinks:           &automount,
+			Tolerations: []corev1.Toleration{
+				{Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+				{Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute},
+			},
+			Containers: []corev1.Container{{
+				Name:            "mesh",
+				Image:           o.cfg.MeshPodImage,
+				ImagePullPolicy: o.cfg.MeshPodPullPolicy,
+				Env: []corev1.EnvVar{
+					{Name: "MESH_NODE_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: secretName}, Key: meshapi.SecretConnectorTokenKey}}},
+					{Name: "SRCNAT_ENABLED", Value: strconv.FormatBool(o.cfg.MeshSRCNATEnabled)},
+				},
+				SecurityContext: &corev1.SecurityContext{
+					RunAsUser:                &runAsUser,
+					AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+					Capabilities:             &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN", "NET_RAW"}},
+				},
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: "warp-data", MountPath: "/var/lib/cloudflare-warp"},
+					{Name: "dev-net-tun", MountPath: "/dev/net/tun"},
+				},
+			}},
+			Volumes: []corev1.Volume{
+				{Name: "warp-data", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: statePath, Type: &directoryOrCreate}}},
+				{Name: "dev-net-tun", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev/net/tun", Type: &charDevice}}},
+			},
+		},
+	}
+
+	pods := o.kube.CoreV1().Pods(o.cfg.Namespace)
+	existing, err := pods.Get(ctx, podName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = pods.Create(ctx, desired, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("create Mesh Pod for node %s: %w", node.Name, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get Mesh Pod for node %s: %w", node.Name, err)
+	}
+	if existing.DeletionTimestamp != nil {
+		return nil
+	}
+	if existing.Annotations["cloudflare-mesh.flannel.io/revision"] != revision {
+		if err := pods.Delete(ctx, podName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("replace Mesh Pod for node %s: %w", node.Name, err)
+		}
+		return nil
+	}
+	if reflect.DeepEqual(existing.Labels, desiredLabels) && reflect.DeepEqual(existing.OwnerReferences, []metav1.OwnerReference{owner}) {
+		return nil
+	}
+	existing.Labels = desiredLabels
+	existing.OwnerReferences = []metav1.OwnerReference{owner}
+	if existing.Annotations == nil {
+		existing.Annotations = make(map[string]string)
+	}
+	existing.Annotations[meshapi.ConnectorIDAnnotation] = connector.ID
+	_, err = pods.Update(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
+func meshPodRevision(cfg Config, nodeName, connectorID, secretName, statePath string) string {
+	data, _ := json.Marshal(struct {
+		NodeName    string
+		ConnectorID string
+		SecretName  string
+		StatePath   string
+		Image       string
+		PullPolicy  corev1.PullPolicy
+		SRCNAT      bool
+	}{nodeName, connectorID, secretName, statePath, cfg.MeshPodImage, cfg.MeshPodPullPolicy, cfg.MeshSRCNATEnabled})
+	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 func (o *Operator) reconcileAndLog(ctx context.Context) {

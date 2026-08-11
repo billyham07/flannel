@@ -127,6 +127,7 @@ cloudflareMesh:
   adoptExistingRegistration: false
   secretPrefix: "cloudflare-mesh-node-"
   stateHostPath: "/var/lib/flannel/cloudflare-mesh"
+  connectTimeout: "3m"
   apiTokenSecret:
     name: "cloudflare-mesh-api-token"
     key: "api-token"
@@ -142,3 +143,13 @@ cloudflareMesh:
       requests:
         cpu: 50m
         memory: 64Mi
+  meshPod:
+    enabled: true
+    namePrefix: "cloudflare-mesh-node-"
+    image:
+      repository: "cloudflare/mesh"
+      tag: "latest"
+      digest: ""
+      pullPolicy: IfNotPresent
+    stateHostPath: "/var/lib/cloudflare-mesh"
+    srcnatEnabled: false

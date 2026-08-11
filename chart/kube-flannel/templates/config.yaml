@@ -79,11 +79,17 @@ data:
         "ControlPlaneMode": "operator",
         "OperatorNamespace": {{ .Release.Namespace | quote }},
         "OperatorSecretPrefix": {{ .Values.cloudflareMesh.secretPrefix | quote }},
+{{- if .Values.cloudflareMesh.meshPod.enabled }}
+        "WARPMode": "external",
+{{- else }}
+        "WARPMode": "host-cli",
         "WARPCLI": "nsenter",
         "WARPCLIArgs": ["-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "warp-cli"],
+{{- end }}
         "WARPInterface": "CloudflareWARP",
         "MeshCIDR": {{ .Values.cloudflareMesh.meshCIDR | quote }},
         "RouteTable": {{ int .Values.cloudflareMesh.routeTable }},
+        "ConnectTimeout": {{ .Values.cloudflareMesh.connectTimeout | quote }},
         "AdoptExistingRegistration": {{ .Values.cloudflareMesh.adoptExistingRegistration }}
 {{- else }}
         "Type": {{ .Values.flannel.backend | quote }}
