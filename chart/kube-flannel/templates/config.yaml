@@ -1,3 +1,9 @@
+{{- if and .Values.cloudflareMesh.enabled (ne .Values.flannel.backend "cloudflare-mesh") }}
+{{- fail "cloudflareMesh.enabled requires flannel.backend=cloudflare-mesh" }}
+{{- end }}
+{{- if and (eq .Values.flannel.backend "cloudflare-mesh") (not .Values.cloudflareMesh.enabled) }}
+{{- fail "flannel.backend=cloudflare-mesh requires cloudflareMesh.enabled=true" }}
+{{- end }}
 kind: ConfigMap
 apiVersion: v1
 metadata:
@@ -68,6 +74,17 @@ data:
         "Port": {{ .Values.flannel.backendPort }},
 {{- end }}
         "Type": {{ .Values.flannel.backend | quote }}
+{{- else if eq .Values.flannel.backend "cloudflare-mesh" }}
+        "Type": "cloudflare-mesh",
+        "ControlPlaneMode": "operator",
+        "OperatorNamespace": {{ .Release.Namespace | quote }},
+        "OperatorSecretPrefix": {{ .Values.cloudflareMesh.secretPrefix | quote }},
+        "WARPCLI": "nsenter",
+        "WARPCLIArgs": ["-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "warp-cli"],
+        "WARPInterface": "CloudflareWARP",
+        "MeshCIDR": {{ .Values.cloudflareMesh.meshCIDR | quote }},
+        "RouteTable": {{ int .Values.cloudflareMesh.routeTable }},
+        "AdoptExistingRegistration": {{ .Values.cloudflareMesh.adoptExistingRegistration }}
 {{- else }}
         "Type": {{ .Values.flannel.backend | quote }}
 {{- end }}
