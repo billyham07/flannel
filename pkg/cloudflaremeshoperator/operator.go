@@ -37,20 +37,25 @@ import (
 )
 
 type Config struct {
-	Namespace         string
-	SecretPrefix      string
-	ClusterName       string
-	ConnectorPrefix   string
-	AnnotationPrefix  string
-	NodeSelector      string
-	SyncPeriod        time.Duration
-	ConnectorHA       bool
-	MeshPodEnabled    bool
-	MeshPodImage      string
-	MeshPodPullPolicy corev1.PullPolicy
-	MeshPodNamePrefix string
-	MeshStateHostPath string
-	MeshSRCNATEnabled bool
+	Namespace               string
+	SecretPrefix            string
+	ClusterName             string
+	ConnectorPrefix         string
+	AnnotationPrefix        string
+	NodeSelector            string
+	SyncPeriod              time.Duration
+	ConnectorHA             bool
+	MeshPodEnabled          bool
+	MeshPodImage            string
+	MeshPodPullPolicy       corev1.PullPolicy
+	MeshPodNamePrefix       string
+	MeshStateHostPath       string
+	MeshSRCNATEnabled       bool
+	CoreDNSNodeHostsEnabled bool
+	CoreDNSNamespace        string
+	CoreDNSConfigMapName    string
+	CoreDNSNodeHostsKey     string
+	CoreDNSHostnameSuffix   string
 }
 
 type Operator struct {
@@ -86,6 +91,14 @@ func New(kube kubernetes.Interface, api meshapi.API, cfg Config) (*Operator, err
 			cfg.MeshStateHostPath = "/var/lib/cloudflare-mesh"
 		}
 	}
+	if cfg.CoreDNSNodeHostsEnabled {
+		if cfg.CoreDNSNamespace == "" || cfg.CoreDNSConfigMapName == "" || cfg.CoreDNSNodeHostsKey == "" {
+			return nil, errors.New("CoreDNS namespace, ConfigMap name, and NodeHosts key are required when NodeHosts sync is enabled")
+		}
+		if cfg.CoreDNSHostnameSuffix == "" {
+			cfg.CoreDNSHostnameSuffix = "-mesh"
+		}
+	}
 	return &Operator{kube: kube, api: api, cfg: cfg}, nil
 }
 
@@ -112,6 +125,7 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 	desiredRoutes := make(map[string]struct{})
 	desiredConnectors := make(map[string]struct{})
 	desiredPods := make(map[string]struct{})
+	desiredNodeHosts := make(map[string]string)
 	var reconcileErrors []error
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
@@ -148,6 +162,14 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("node %s advertises connector %s, operator owns %s", node.Name, data.ConnectorID, connector.ID))
 			continue
 		}
+		if o.cfg.CoreDNSNodeHostsEnabled {
+			meshIP := net.ParseIP(data.MeshIP)
+			if meshIP == nil || meshIP.To4() == nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("node %s advertises invalid IPv4 Mesh IP %q", node.Name, data.MeshIP))
+				continue
+			}
+			desiredNodeHosts[node.Name+o.cfg.CoreDNSHostnameSuffix] = meshIP.String()
+		}
 		network, err := nodeIPv4PodCIDR(node)
 		if err != nil {
 			reconcileErrors = append(reconcileErrors, err)
@@ -160,6 +182,11 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 			continue
 		}
 		desiredRoutes[routeKey(route.TunnelID, route.Network)] = struct{}{}
+	}
+	if len(reconcileErrors) == 0 && o.cfg.CoreDNSNodeHostsEnabled {
+		if err := o.ensureCoreDNSNodeHosts(ctx, desiredNodeHosts); err != nil {
+			reconcileErrors = append(reconcileErrors, err)
+		}
 	}
 	if len(reconcileErrors) > 0 {
 		return errors.Join(reconcileErrors...)

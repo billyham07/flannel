@@ -45,6 +45,11 @@ spec:
         - --mesh-pod-name-prefix={{ .Values.cloudflareMesh.meshPod.namePrefix }}
         - --mesh-state-host-path={{ .Values.cloudflareMesh.meshPod.stateHostPath }}
         - --mesh-srcnat-enabled={{ .Values.cloudflareMesh.meshPod.srcnatEnabled }}
+        - --coredns-node-hosts-enabled={{ .Values.cloudflareMesh.coreDNSNodeHosts.enabled }}
+        - --coredns-namespace={{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}
+        - --coredns-configmap-name={{ .Values.cloudflareMesh.coreDNSNodeHosts.configMapName }}
+        - --coredns-node-hosts-key={{ .Values.cloudflareMesh.coreDNSNodeHosts.dataKey }}
+        - --coredns-hostname-suffix={{ .Values.cloudflareMesh.coreDNSNodeHosts.hostnameSuffix }}
         {{- if .Values.cloudflareMesh.operator.nodeSelector }}
         - --node-selector={{ .Values.cloudflareMesh.operator.nodeSelector }}
         {{- end }}

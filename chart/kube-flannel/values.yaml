@@ -153,3 +153,9 @@ cloudflareMesh:
       pullPolicy: IfNotPresent
     stateHostPath: "/var/lib/cloudflare-mesh"
     srcnatEnabled: false
+  coreDNSNodeHosts:
+    enabled: false
+    namespace: "kube-system"
+    configMapName: "coredns"
+    dataKey: "NodeHosts"
+    hostnameSuffix: "-mesh"
