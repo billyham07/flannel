@@ -16,6 +16,13 @@ spec:
       labels:
         app: cloudflare-mesh-operator
     spec:
+      hostNetwork: true
+      priorityClassName: system-cluster-critical
+      tolerations:
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
       serviceAccountName: cloudflare-mesh-operator
       containers:
       - name: operator

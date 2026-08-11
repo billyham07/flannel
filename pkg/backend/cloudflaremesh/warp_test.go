@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,8 +34,10 @@ type recordedCommand struct {
 }
 
 type fakeCommandExecutor struct {
-	commands []recordedCommand
-	statuses []string
+	commands           []recordedCommand
+	statuses           []string
+	registrationOutput string
+	registrationErr    error
 }
 
 func (f *fakeCommandExecutor) Run(_ context.Context, name string, args ...string) (string, error) {
@@ -47,7 +50,7 @@ func (f *fakeCommandExecutor) Run(_ context.Context, name string, args ...string
 		f.statuses = f.statuses[1:]
 		return status, nil
 	}
-	return "", nil
+	return f.registrationOutput, f.registrationErr
 }
 
 func TestWARPRegistersAndConnects(t *testing.T) {
@@ -116,6 +119,33 @@ func TestWARPPreservesDifferentConnectorState(t *testing.T) {
 	}, false)
 	if err == nil {
 		t.Fatal("expected connector mismatch error")
+	}
+}
+
+func TestWARPRedactsConnectorTokenFromRegistrationError(t *testing.T) {
+	executor := &fakeCommandExecutor{
+		statuses:           []string{"Registration Missing"},
+		registrationOutput: "registration failed for secret-token",
+		registrationErr:    errors.New("exit status 1"),
+	}
+	client := &warpClient{
+		cliPath:      "warp-cli",
+		stateFile:    filepath.Join(t.TempDir(), "state.json"),
+		connectWait:  time.Second,
+		pollInterval: time.Millisecond,
+		executor:     executor,
+	}
+	err := client.EnsureRegisteredAndConnected(context.Background(), &meshapi.ConnectorCredentials{
+		ID: "connector-1", Name: "node-a", Token: "secret-token",
+	}, false)
+	if err == nil {
+		t.Fatal("expected registration error")
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("registration error leaked connector token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "registration failed for [REDACTED]") {
+		t.Fatalf("registration diagnostics were not preserved: %v", err)
 	}
 }
 
