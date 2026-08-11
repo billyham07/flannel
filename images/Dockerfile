@@ -18,7 +18,8 @@ COPY pkg /build/pkg
 COPY cmd /build/cmd
 WORKDIR /build
 RUN mkdir dist
-RUN go mod download
+ARG GOPROXY=https://proxy.golang.org,direct
+RUN GOPROXY=${GOPROXY} go mod download
 
 ARG TARGETPLATFORM
 ARG TAG
