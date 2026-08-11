@@ -56,6 +56,7 @@ PACKAGES_EXPANDED=$(PACKAGES:%=github.com/flannel-io/flannel/%)
 ### BUILDING
 clean:
 	rm -f dist/flanneld*
+	rm -f dist/cloudflare-mesh-operator*
 	rm -f dist/*.aci
 	rm -f dist/*.docker
 	rm -f dist/*.tar.gz
@@ -64,6 +65,9 @@ clean:
 dist/flanneld: $(shell find . -type f  -name '*.go')
 	CGO_ENABLED=$(CGO_ENABLED) go build -o dist/flanneld \
 	  -ldflags '-s -w -X github.com/flannel-io/flannel/pkg/version.Version=$(TAG) -extldflags "-static"'
+
+dist/cloudflare-mesh-operator: $(shell find cmd/cloudflare-mesh-operator pkg/cloudflaremesh pkg/cloudflaremeshoperator -type f -name '*.go')
+	CGO_ENABLED=0 go build -o dist/cloudflare-mesh-operator ./cmd/cloudflare-mesh-operator
 
 dist/flanneld.exe: $(shell find . -type f  -name '*.go')
 	CXX=x86_64-w64-mingw32-g++ CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows go build -o dist/flanneld.exe \

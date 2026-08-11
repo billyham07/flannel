@@ -86,6 +86,70 @@ Alloc performs subnet allocation with no forwarding of data packets.
 Type:
 * `Type` (string): `alloc`
 
+### Cloudflare Mesh
+
+Cloudflare Mesh uses a Cloudflare One Client on every node as the encrypted
+transport for Flannel node subnets. The `cloudflare-mesh-operator` creates a
+Mesh connector for each Kubernetes Node, publishes that node's PodCIDR through
+the Cloudflare route API, and removes routes owned by deleted nodes. The node
+backend enrolls the host client and reconciles routes for remote Flannel leases
+in the Cloudflare WARP policy routing table.
+
+This backend is currently IPv4-only.
+
+Requirements:
+
+* Install and enable the Cloudflare One Client (`warp-svc`) on every node. The
+  backend manages connector enrollment, connection, and routing, but does not
+  install host operating-system packages.
+* Configure the Cloudflare account for Mesh connectivity and create an API
+  token with `Cloudflare One Networks Write` and `Cloudflare One Connectors
+  Write` permissions.
+* When using K3s, disable its embedded Flannel and deploy this Flannel build
+  with the Helm chart.
+
+Backend configuration:
+
+```json
+{
+  "Network": "10.244.0.0/16",
+  "Backend": {
+    "Type": "cloudflare-mesh",
+    "ControlPlaneMode": "operator",
+    "OperatorNamespace": "kube-flannel",
+    "OperatorSecretPrefix": "cloudflare-mesh-node-",
+    "WARPCLI": "nsenter",
+    "WARPCLIArgs": ["-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "warp-cli"],
+    "WARPInterface": "CloudflareWARP",
+    "MeshCIDR": "100.96.0.0/12",
+    "RouteTable": 0
+  }
+}
+```
+
+`RouteTable: 0` enables automatic discovery from Linux policy routing rules.
+Set a table number explicitly only when discovery is ambiguous. Set
+`AdoptExistingRegistration: true` once when migrating a host that is already
+registered with the connector created for that Kubernetes Node.
+
+Helm example:
+
+```yaml
+flannel:
+  backend: cloudflare-mesh
+cloudflareMesh:
+  enabled: true
+  accountID: 0123456789abcdef0123456789abcdef
+  clusterName: production
+  apiTokenSecret:
+    name: cloudflare-mesh-api-token
+    key: api-token
+```
+
+The API token Secret must exist in the release namespace before installing the
+chart. Bootstrap Secrets contain connector enrollment tokens and should be
+encrypted at rest. Only the operator holds the account API token.
+
 ### TencentCloud VPC
 
 Use TencentCloud VPC to create IP routes in a [TencentCloud VPC route table](https://intl.cloud.tencent.com/product/vpc) when running in an TencentCloud VPC. This mitigates the need to create a separate flannel interface.

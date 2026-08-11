@@ -112,3 +112,29 @@ netpol:
   image:
     repository: registry.k8s.io/networking/kube-network-policies
     tag: v1.0.0
+
+cloudflareMesh:
+  enabled: false
+  accountID: ""
+  clusterName: "default"
+  connectorPrefix: "flannel-"
+  connectorHA: false
+  meshCIDR: "100.96.0.0/12"
+  routeTable: 0
+  adoptExistingRegistration: false
+  secretPrefix: "cloudflare-mesh-node-"
+  stateHostPath: "/var/lib/flannel/cloudflare-mesh"
+  apiTokenSecret:
+    name: "cloudflare-mesh-api-token"
+    key: "api-token"
+  operator:
+    replicas: 2
+    syncPeriod: "15s"
+    nodeSelector: ""
+    image:
+      repository: ""
+      tag: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
