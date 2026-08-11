@@ -104,7 +104,10 @@ Requirements:
   install host operating-system packages.
 * Configure the Cloudflare account for Mesh connectivity and create an API
   token with `Cloudflare One Networks Write` and `Cloudflare One Connectors
-  Write` permissions.
+  Write` (or `Cloudflare One Connector: WARP Write`) permissions.
+* Install the standard CNI plugins, including `bridge`, `host-local`,
+  `loopback`, and `portmap`, in `flannel.cniBinDir` on every node. The Flannel
+  CNI image installs only the `flannel` binary.
 * When using K3s, disable its embedded Flannel and deploy this Flannel build
   with the Helm chart.
 
@@ -149,6 +152,12 @@ cloudflareMesh:
 The API token Secret must exist in the release namespace before installing the
 chart. Bootstrap Secrets contain connector enrollment tokens and should be
 encrypted at rest. Only the operator holds the account API token.
+
+The Helm chart runs the operator with host networking so it can bootstrap a
+node before CNI is ready. In Cloudflare Mesh mode, the Flannel container is
+privileged and enters the host namespaces to call the host-installed
+`warp-cli`; other backends retain the chart's normal capability-only security
+context.
 
 ### TencentCloud VPC
 

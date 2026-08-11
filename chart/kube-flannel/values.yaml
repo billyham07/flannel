@@ -30,7 +30,7 @@ flannel:
   - "--ip-masq"
   - "--kube-subnet-mgr"
   # Backend for kube-flannel. Backend should not be changed
-  # at runtime. (vxlan, host-gw, wireguard, udp)
+  # at runtime. (vxlan, host-gw, wireguard, udp, cloudflare-mesh)
   # Documentation at https://github.com/flannel-io/flannel/blob/master/Documentation/backends.md
   backend: "vxlan"
   # Port used by the backend 0 means default value (VXLAN: 8472, Wireguard: 51821, UDP: 8285)
