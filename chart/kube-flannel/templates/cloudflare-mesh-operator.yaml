@@ -42,6 +42,10 @@ spec:
         {{- if .Values.cloudflareMesh.operator.nodeSelector }}
         - --node-selector={{ .Values.cloudflareMesh.operator.nodeSelector }}
         {{- end }}
+        {{- with .Values.cloudflareMesh.operator.extraEnv }}
+        env:
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         volumeMounts:
         - name: api-token
           mountPath: /var/run/secrets/cloudflare-mesh
