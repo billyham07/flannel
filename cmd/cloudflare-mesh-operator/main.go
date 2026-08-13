@@ -56,6 +56,10 @@ type options struct {
 	meshPodNamePrefix       string
 	meshStateHostPath       string
 	meshSRCNATEnabled       bool
+	meshPodMemoryRequest    string
+	meshPodMemoryLimit      string
+	meshPodMemoryRestartAt  string
+	meshPodMemoryCheckEvery time.Duration
 	coreDNSNodeHostsEnabled bool
 	coreDNSNamespace        string
 	coreDNSConfigMapName    string
@@ -101,6 +105,10 @@ func parseFlags() *options {
 	flag.StringVar(&opts.meshPodNamePrefix, "mesh-pod-name-prefix", "cloudflare-mesh-node-", "Per-node Cloudflare Mesh Pod name prefix")
 	flag.StringVar(&opts.meshStateHostPath, "mesh-state-host-path", "/var/lib/cloudflare-mesh", "Host path root for per-connector Cloudflare Mesh registration state")
 	flag.BoolVar(&opts.meshSRCNATEnabled, "mesh-srcnat-enabled", false, "Enable source NAT in containerized Cloudflare Mesh nodes")
+	flag.StringVar(&opts.meshPodMemoryRequest, "mesh-pod-memory-request", "64Mi", "Memory request for each Cloudflare Mesh Pod")
+	flag.StringVar(&opts.meshPodMemoryLimit, "mesh-pod-memory-limit", "200Mi", "Memory limit for each Cloudflare Mesh Pod")
+	flag.StringVar(&opts.meshPodMemoryRestartAt, "mesh-pod-memory-restart-threshold", "160Mi", "Restart a Cloudflare Mesh Pod when its cgroup memory reaches this threshold")
+	flag.DurationVar(&opts.meshPodMemoryCheckEvery, "mesh-pod-memory-check-period", time.Minute, "Interval between Cloudflare Mesh Pod memory checks")
 	flag.BoolVar(&opts.coreDNSNodeHostsEnabled, "coredns-node-hosts-enabled", false, "Publish Node Mesh IP hostnames to a CoreDNS NodeHosts ConfigMap")
 	flag.StringVar(&opts.coreDNSNamespace, "coredns-namespace", "kube-system", "Namespace containing the CoreDNS NodeHosts ConfigMap")
 	flag.StringVar(&opts.coreDNSConfigMapName, "coredns-configmap-name", "coredns", "CoreDNS NodeHosts ConfigMap name")
@@ -158,6 +166,10 @@ func run(ctx context.Context, opts options) error {
 		MeshPodNamePrefix:       opts.meshPodNamePrefix,
 		MeshStateHostPath:       opts.meshStateHostPath,
 		MeshSRCNATEnabled:       opts.meshSRCNATEnabled,
+		MeshPodMemoryRequest:    opts.meshPodMemoryRequest,
+		MeshPodMemoryLimit:      opts.meshPodMemoryLimit,
+		MeshPodMemoryRestartAt:  opts.meshPodMemoryRestartAt,
+		MeshPodMemoryCheckEvery: opts.meshPodMemoryCheckEvery,
 		CoreDNSNodeHostsEnabled: opts.coreDNSNodeHostsEnabled,
 		CoreDNSNamespace:        opts.coreDNSNamespace,
 		CoreDNSConfigMapName:    opts.coreDNSConfigMapName,

@@ -258,4 +258,25 @@ func TestReconcileWaitsForFlannelLeaseBeforePublishingRoute(t *testing.T) {
 	if got := pod.Spec.Volumes[2].EmptyDir; got == nil || got.Medium != corev1.StorageMediumMemory {
 		t.Fatalf("expected memory-backed /run/dbus volume, got %#v", got)
 	}
+	container := pod.Spec.Containers[0]
+	if got := container.Resources.Requests.Memory().String(); got != "64Mi" {
+		t.Fatalf("unexpected Mesh Pod memory request %q", got)
+	}
+	if got := container.Resources.Limits.Memory().String(); got != "200Mi" {
+		t.Fatalf("unexpected Mesh Pod memory limit %q", got)
+	}
+	if container.LivenessProbe == nil || container.LivenessProbe.Exec == nil || !strings.Contains(container.LivenessProbe.Exec.Command[2], "167772160") {
+		t.Fatalf("expected a 160Mi memory liveness threshold, got %#v", container.LivenessProbe)
+	}
+}
+
+func TestNewRejectsMeshMemoryThresholdAtLimit(t *testing.T) {
+	_, err := New(fake.NewClientset(), &fakeMeshAPI{}, Config{
+		Namespace: "kube-flannel", SecretPrefix: "mesh-", ClusterName: "test",
+		MeshPodEnabled: true, MeshPodImage: "cloudflare/mesh:test",
+		MeshPodMemoryLimit: "256Mi", MeshPodMemoryRestartAt: "256Mi",
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be below limit") {
+		t.Fatalf("expected invalid memory threshold error, got %v", err)
+	}
 }

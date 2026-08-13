@@ -152,6 +152,11 @@ cloudflareMesh:
       pullPolicy: IfNotPresent
     stateHostPath: /var/lib/cloudflare-mesh
     srcnatEnabled: false
+    memory:
+      request: 64Mi
+      limit: 200Mi
+      restartThreshold: 160Mi
+      checkPeriod: 60s
   coreDNSNodeHosts:
     enabled: true
     namespace: kube-system
