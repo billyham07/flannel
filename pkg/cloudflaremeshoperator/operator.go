@@ -30,6 +30,7 @@ import (
 	meshapi "github.com/flannel-io/flannel/pkg/cloudflaremesh"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -51,6 +52,10 @@ type Config struct {
 	MeshPodNamePrefix       string
 	MeshStateHostPath       string
 	MeshSRCNATEnabled       bool
+	MeshPodMemoryRequest    string
+	MeshPodMemoryLimit      string
+	MeshPodMemoryRestartAt  string
+	MeshPodMemoryCheckEvery time.Duration
 	CoreDNSNodeHostsEnabled bool
 	CoreDNSNamespace        string
 	CoreDNSConfigMapName    string
@@ -91,6 +96,36 @@ func New(kube kubernetes.Interface, api meshapi.API, cfg Config) (*Operator, err
 		}
 		if cfg.MeshStateHostPath == "" {
 			cfg.MeshStateHostPath = "/var/lib/cloudflare-mesh"
+		}
+		if cfg.MeshPodMemoryRequest == "" {
+			cfg.MeshPodMemoryRequest = "64Mi"
+		}
+		if cfg.MeshPodMemoryLimit == "" {
+			cfg.MeshPodMemoryLimit = "200Mi"
+		}
+		if cfg.MeshPodMemoryRestartAt == "" {
+			cfg.MeshPodMemoryRestartAt = "160Mi"
+		}
+		if cfg.MeshPodMemoryCheckEvery <= 0 {
+			cfg.MeshPodMemoryCheckEvery = time.Minute
+		}
+		request, err := resource.ParseQuantity(cfg.MeshPodMemoryRequest)
+		if err != nil || request.Sign() <= 0 {
+			return nil, fmt.Errorf("invalid Mesh Pod memory request %q", cfg.MeshPodMemoryRequest)
+		}
+		limit, err := resource.ParseQuantity(cfg.MeshPodMemoryLimit)
+		if err != nil || limit.Sign() <= 0 {
+			return nil, fmt.Errorf("invalid Mesh Pod memory limit %q", cfg.MeshPodMemoryLimit)
+		}
+		restartAt, err := resource.ParseQuantity(cfg.MeshPodMemoryRestartAt)
+		if err != nil || restartAt.Sign() <= 0 {
+			return nil, fmt.Errorf("invalid Mesh Pod memory restart threshold %q", cfg.MeshPodMemoryRestartAt)
+		}
+		if request.Cmp(limit) > 0 {
+			return nil, fmt.Errorf("Mesh Pod memory request %s exceeds limit %s", request.String(), limit.String())
+		}
+		if restartAt.Cmp(limit) >= 0 {
+			return nil, fmt.Errorf("Mesh Pod memory restart threshold %s must be below limit %s", restartAt.String(), limit.String())
 		}
 	}
 	if cfg.CoreDNSNodeHostsEnabled {
@@ -149,7 +184,7 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 		if o.cfg.MeshPodEnabled {
 			podName := meshapi.NodePodName(o.cfg.MeshPodNamePrefix, node.Name)
 			desiredPods[podName] = struct{}{}
-			if err := o.ensureMeshPod(ctx, node, connector); err != nil {
+			if err := o.ensureMeshPod(ctx, node, connector, len(nodes.Items)); err != nil {
 				reconcileErrors = append(reconcileErrors, err)
 				continue
 			}
@@ -262,7 +297,7 @@ func (o *Operator) Reconcile(ctx context.Context) error {
 	return errors.Join(reconcileErrors...)
 }
 
-func (o *Operator) ensureMeshPod(ctx context.Context, node *corev1.Node, connector *meshapi.ConnectorCredentials) error {
+func (o *Operator) ensureMeshPod(ctx context.Context, node *corev1.Node, connector *meshapi.ConnectorCredentials, desiredPodCount int) error {
 	podName := meshapi.NodePodName(o.cfg.MeshPodNamePrefix, node.Name)
 	secretName := meshapi.NodeSecretName(o.cfg.SecretPrefix, node.Name)
 	statePath := path.Join(o.cfg.MeshStateHostPath, meshapi.ConnectorStateDirectory(connector.ID))
@@ -273,6 +308,13 @@ func (o *Operator) ensureMeshPod(ctx context.Context, node *corev1.Node, connect
 	runAsUser := int64(0)
 	directoryOrCreate := corev1.HostPathDirectoryOrCreate
 	charDevice := corev1.HostPathCharDev
+	memoryRequest := resource.MustParse(o.cfg.MeshPodMemoryRequest)
+	memoryLimit := resource.MustParse(o.cfg.MeshPodMemoryLimit)
+	memoryRestartAt := resource.MustParse(o.cfg.MeshPodMemoryRestartAt)
+	memoryCheckSeconds := int32(o.cfg.MeshPodMemoryCheckEvery / time.Second)
+	if memoryCheckSeconds < 1 {
+		memoryCheckSeconds = 1
+	}
 	desiredLabels := map[string]string{
 		meshapi.ManagedByLabel:        meshapi.ManagedByOperator,
 		meshapi.MeshPodComponentLabel: meshapi.MeshPodComponent,
@@ -311,6 +353,19 @@ func (o *Operator) ensureMeshPod(ctx context.Context, node *corev1.Node, connect
 					AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 					Capabilities:             &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN", "NET_RAW"}},
 				},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceMemory: memoryRequest},
+					Limits:   corev1.ResourceList{corev1.ResourceMemory: memoryLimit},
+				},
+				LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{
+						"sh", "-c", fmt.Sprintf("usage=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || true); [ -z \"$usage\" ] || [ \"$usage\" -lt %d ]", memoryRestartAt.Value()),
+					}}},
+					InitialDelaySeconds: 300,
+					PeriodSeconds:       memoryCheckSeconds,
+					TimeoutSeconds:      5,
+					FailureThreshold:    1,
+				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "warp-data", MountPath: "/var/lib/cloudflare-warp"},
 					{Name: "dev-net-tun", MountPath: "/dev/net/tun"},
@@ -341,6 +396,13 @@ func (o *Operator) ensureMeshPod(ctx context.Context, node *corev1.Node, connect
 		return nil
 	}
 	if existing.Annotations["cloudflare-mesh.flannel.io/revision"] != revision {
+		replacementInProgress, err := o.meshPodReplacementInProgress(ctx, podName, desiredPodCount)
+		if err != nil {
+			return err
+		}
+		if replacementInProgress {
+			return nil
+		}
 		if err := pods.Delete(ctx, podName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("replace Mesh Pod for node %s: %w", node.Name, err)
 		}
@@ -359,16 +421,54 @@ func (o *Operator) ensureMeshPod(ctx context.Context, node *corev1.Node, connect
 	return err
 }
 
+func (o *Operator) meshPodReplacementInProgress(ctx context.Context, currentPod string, desiredPodCount int) (bool, error) {
+	selector := meshapi.ManagedByLabel + "=" + meshapi.ManagedByOperator + "," +
+		meshapi.MeshPodComponentLabel + "=" + meshapi.MeshPodComponent
+	pods, err := o.kube.CoreV1().Pods(o.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return false, fmt.Errorf("list Mesh Pods before replacing %s: %w", currentPod, err)
+	}
+	if len(pods.Items) < desiredPodCount {
+		return true, nil
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Name == currentPod {
+			continue
+		}
+		if pod.DeletionTimestamp != nil || !meshPodReady(pod) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func meshPodReady(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == "mesh" {
+			return pod.Status.ContainerStatuses[i].Ready
+		}
+	}
+	return false
+}
+
 func meshPodRevision(cfg Config, nodeName, connectorID, secretName, statePath string) string {
 	data, _ := json.Marshal(struct {
-		NodeName    string
-		ConnectorID string
-		SecretName  string
-		StatePath   string
-		Image       string
-		PullPolicy  corev1.PullPolicy
-		SRCNAT      bool
-	}{nodeName, connectorID, secretName, statePath, cfg.MeshPodImage, cfg.MeshPodPullPolicy, cfg.MeshSRCNATEnabled})
+		NodeName         string
+		ConnectorID      string
+		SecretName       string
+		StatePath        string
+		Image            string
+		PullPolicy       corev1.PullPolicy
+		SRCNAT           bool
+		MemoryRequest    string
+		MemoryLimit      string
+		MemoryRestartAt  string
+		MemoryCheckEvery time.Duration
+	}{nodeName, connectorID, secretName, statePath, cfg.MeshPodImage, cfg.MeshPodPullPolicy, cfg.MeshSRCNATEnabled, cfg.MeshPodMemoryRequest, cfg.MeshPodMemoryLimit, cfg.MeshPodMemoryRestartAt, cfg.MeshPodMemoryCheckEvery})
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 

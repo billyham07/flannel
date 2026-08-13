@@ -45,6 +45,10 @@ spec:
         - --mesh-pod-name-prefix={{ .Values.cloudflareMesh.meshPod.namePrefix }}
         - --mesh-state-host-path={{ .Values.cloudflareMesh.meshPod.stateHostPath }}
         - --mesh-srcnat-enabled={{ .Values.cloudflareMesh.meshPod.srcnatEnabled }}
+        - --mesh-pod-memory-request={{ .Values.cloudflareMesh.meshPod.memory.request }}
+        - --mesh-pod-memory-limit={{ .Values.cloudflareMesh.meshPod.memory.limit }}
+        - --mesh-pod-memory-restart-threshold={{ .Values.cloudflareMesh.meshPod.memory.restartThreshold }}
+        - --mesh-pod-memory-check-period={{ .Values.cloudflareMesh.meshPod.memory.checkPeriod }}
         - --coredns-node-hosts-enabled={{ .Values.cloudflareMesh.coreDNSNodeHosts.enabled }}
         - --coredns-namespace={{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}
         - --coredns-configmap-name={{ .Values.cloudflareMesh.coreDNSNodeHosts.configMapName }}
