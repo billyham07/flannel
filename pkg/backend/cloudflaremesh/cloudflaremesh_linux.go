@@ -50,6 +50,9 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 	if err != nil {
 		return nil, err
 	}
+	if err := removeLegacyWARPFirewall(ctx); err != nil {
+		return nil, err
+	}
 	var connector *meshapi.ConnectorCredentials
 	var api meshapi.API
 	if cfg.ControlPlaneMode == "operator" {

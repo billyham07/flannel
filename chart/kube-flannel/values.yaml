@@ -147,10 +147,10 @@ cloudflareMesh:
         cpu: 50m
         memory: 64Mi
   coreDNSNodeHosts:
-    enabled: false
+    enabled: true
     namespace: "kube-system"
     configMapName: "coredns"
     dataKey: "NodeHosts"
     hostnameSuffix: "-mesh"
-    rolloutKind: "deployment"
+    rolloutKind: "daemonset"
     rolloutName: "coredns"

@@ -63,6 +63,17 @@ func TestConnectorAccountIDRejectsMalformedToken(t *testing.T) {
 	}
 }
 
+func TestDeviceRegistrationID(t *testing.T) {
+	for input, want := range map[string]string{
+		"t.019fffbd-6df8-13a3-9edb-1d80019bfa41": "019fffbd-6df8-13a3-9edb-1d80019bfa41",
+		"019fffa4-03ff-180d-9919-0f72ab793e70":   "019fffa4-03ff-180d-9919-0f72ab793e70",
+	} {
+		if got := deviceRegistrationID(input); got != want {
+			t.Fatalf("deviceRegistrationID(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestConnectorChangeReenrollsInsteadOfReturningReadError(t *testing.T) {
 	for name, connectorID := range map[string]string{
 		"connector changed":   "old-connector",

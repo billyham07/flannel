@@ -28,6 +28,11 @@ import (
 
 const hostSNATComment = "cloudflare-mesh hostNetwork SNAT"
 
+const (
+	meshRulePriority   = 109
+	remoteRulePriority = 110
+)
+
 type iptablesClient interface {
 	Exists(table, chain string, rulespec ...string) (bool, error)
 	Insert(table, chain string, pos int, rulespec ...string) error
@@ -85,7 +90,7 @@ func newLocalRouteManager(cfg *runtimeConfig, meshIP net.IP, clusterCIDR, localC
 		return nil, fmt.Errorf("initialize hostNetwork SNAT: %w", err)
 	}
 	table := cfg.RouteTable
-	return &netlinkRouteManager{
+	manager := &netlinkRouteManager{
 		linkName:    link.Attrs().Name,
 		meshIP:      meshIP,
 		mtu:         link.Attrs().MTU,
@@ -94,7 +99,34 @@ func newLocalRouteManager(cfg *runtimeConfig, meshIP net.IP, clusterCIDR, localC
 		localCIDR:   localNetwork.String(),
 		localSNATIP: localSNATIP.String(),
 		iptables:    ipt,
-	}, nil
+	}
+	if err := manager.ensureMeshRoute(link, meshNetwork); err != nil {
+		return nil, err
+	}
+	return manager, nil
+}
+
+// ensureMeshRoute makes connector virtual addresses first-class tunnel
+// destinations. Cloudflare reserves 100.96.0.0/12 for WARP virtual IPs, but a
+// /32 address on a TUN device does not create an on-link route automatically.
+func (m *netlinkRouteManager) ensureMeshRoute(link netlink.Link, meshNetwork *net.IPNet) error {
+	route := netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Scope:     netlink.SCOPE_LINK,
+		Dst:       meshNetwork,
+		Table:     m.table,
+	}
+	if err := netlink.RouteReplace(&route); err != nil {
+		return fmt.Errorf("ensure Mesh CIDR route %s in table %d: %w", meshNetwork, m.table, err)
+	}
+	rule := netlink.NewRule()
+	rule.Priority = meshRulePriority
+	rule.Table = m.table
+	rule.Dst = meshNetwork
+	if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, syscall.EEXIST) {
+		return fmt.Errorf("ensure Mesh CIDR policy rule for %s: %w", meshNetwork, err)
+	}
+	return nil
 }
 
 func (m *netlinkRouteManager) Ensure(network string) error {
@@ -116,7 +148,7 @@ func (m *netlinkRouteManager) Ensure(network string) error {
 		return fmt.Errorf("ensure native Mesh route %s in table %d: %w", network, m.table, err)
 	}
 	rule := netlink.NewRule()
-	rule.Priority = 110
+	rule.Priority = remoteRulePriority
 	rule.Table = m.table
 	rule.Dst = dst
 	if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, syscall.EEXIST) {
@@ -155,7 +187,7 @@ func (m *netlinkRouteManager) Remove(network string) error {
 		return fmt.Errorf("list native Mesh policy rules: %w", err)
 	}
 	for i := range rules {
-		if rules[i].Table == m.table && rules[i].Priority == 110 && rules[i].Dst != nil && rules[i].Dst.String() == dst.String() {
+		if rules[i].Table == m.table && rules[i].Priority == remoteRulePriority && rules[i].Dst != nil && rules[i].Dst.String() == dst.String() {
 			if err := netlink.RuleDel(&rules[i]); err != nil && !errors.Is(err, syscall.ENOENT) {
 				return fmt.Errorf("remove native Mesh policy rule for %s: %w", network, err)
 			}
