@@ -26,7 +26,10 @@ spec:
       serviceAccountName: cloudflare-mesh-operator
       containers:
       - name: operator
-        image: {{ default .Values.flannel.image.repository .Values.cloudflareMesh.operator.image.repository }}:{{ default .Values.flannel.image.tag .Values.cloudflareMesh.operator.image.tag }}
+        {{- $operatorRepository := default .Values.flannel.image.repository .Values.cloudflareMesh.operator.image.repository }}
+        {{- $operatorTag := default .Values.flannel.image.tag .Values.cloudflareMesh.operator.image.tag }}
+        {{- $operatorDigest := default .Values.flannel.image.digest .Values.cloudflareMesh.operator.image.digest }}
+        image: {{ $operatorRepository }}{{- if $operatorDigest }}@{{ $operatorDigest }}{{- else }}:{{ $operatorTag }}{{- end }}
         command:
         - /opt/bin/cloudflare-mesh-operator
         args:
@@ -39,16 +42,6 @@ spec:
         - --secret-prefix={{ .Values.cloudflareMesh.secretPrefix }}
         - --sync-period={{ .Values.cloudflareMesh.operator.syncPeriod }}
         - --connector-ha={{ .Values.cloudflareMesh.connectorHA }}
-        - --mesh-pod-enabled={{ .Values.cloudflareMesh.meshPod.enabled }}
-        - --mesh-pod-image={{ .Values.cloudflareMesh.meshPod.image.repository }}{{- if .Values.cloudflareMesh.meshPod.image.digest }}@{{ .Values.cloudflareMesh.meshPod.image.digest }}{{- else }}:{{ .Values.cloudflareMesh.meshPod.image.tag }}{{- end }}
-        - --mesh-pod-image-pull-policy={{ .Values.cloudflareMesh.meshPod.image.pullPolicy }}
-        - --mesh-pod-name-prefix={{ .Values.cloudflareMesh.meshPod.namePrefix }}
-        - --mesh-state-host-path={{ .Values.cloudflareMesh.meshPod.stateHostPath }}
-        - --mesh-srcnat-enabled={{ .Values.cloudflareMesh.meshPod.srcnatEnabled }}
-        - --mesh-pod-memory-request={{ .Values.cloudflareMesh.meshPod.memory.request }}
-        - --mesh-pod-memory-limit={{ .Values.cloudflareMesh.meshPod.memory.limit }}
-        - --mesh-pod-memory-restart-threshold={{ .Values.cloudflareMesh.meshPod.memory.restartThreshold }}
-        - --mesh-pod-memory-check-period={{ .Values.cloudflareMesh.meshPod.memory.checkPeriod }}
         - --coredns-node-hosts-enabled={{ .Values.cloudflareMesh.coreDNSNodeHosts.enabled }}
         - --coredns-namespace={{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}
         - --coredns-configmap-name={{ .Values.cloudflareMesh.coreDNSNodeHosts.configMapName }}

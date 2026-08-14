@@ -88,20 +88,24 @@ Type:
 
 ### Cloudflare Mesh
 
-Cloudflare Mesh uses the official `cloudflare/mesh` container on every node as
-the encrypted transport for Flannel node subnets. The
-`cloudflare-mesh-operator` creates a Mesh connector, bootstrap Secret, and
-host-networked Mesh Pod for each Kubernetes Node. It publishes that node's
-PodCIDR through the Cloudflare route API and removes resources owned by deleted
-nodes. The node backend waits for the `CloudflareWARP` interface and reconciles
-routes for remote Flannel leases in its Linux policy routing table.
+Cloudflare Mesh embeds the encrypted transport directly in `flanneld`. It
+enrolls the node connector, creates the `flannel.mesh` TUN device, establishes
+a QUIC/HTTP3 MASQUE CONNECT-IP session, reconnects it, and reconciles remote
+PodCIDR routes in a dedicated Linux policy-routing table. It does not install
+or execute `warp-svc`, `warp-cli`, or a separate Cloudflare Mesh Pod.
+
+The `cloudflare-mesh-operator` is control-plane only. It creates one Cloudflare
+connector and one bootstrap Secret per Kubernetes Node, publishes the Node's
+ready Flannel PodCIDR through the Cloudflare route API, and removes resources
+owned by deleted Nodes. `flanneld` reads only its own connector token.
 
 This backend is currently IPv4-only.
 
 Requirements:
 
-* Nodes must provide `/dev/net/tun` and allow the Mesh Pod the `NET_ADMIN` and
-  `NET_RAW` capabilities. No host Cloudflare One Client package is required.
+* Nodes must provide `/dev/net/tun`. The chart runs `flanneld` privileged when
+  this backend is enabled so it can create the TUN device and policy routes.
+  No host Cloudflare One Client package is required.
 * Configure the Cloudflare account for Mesh connectivity and create an API
   token with `Cloudflare One Networks Write` and `Cloudflare One Connectors
   Write` (or `Cloudflare One Connector: WARP Write`) permissions.
@@ -121,18 +125,22 @@ Backend configuration:
     "ControlPlaneMode": "operator",
     "OperatorNamespace": "kube-flannel",
     "OperatorSecretPrefix": "cloudflare-mesh-node-",
-    "WARPMode": "external",
-    "WARPInterface": "CloudflareWARP",
+    "StateFile": "/var/lib/flannel/cloudflare-mesh/state.json",
+    "InterfaceName": "flannel.mesh",
     "MeshCIDR": "100.96.0.0/12",
-    "RouteTable": 0
+    "RouteTable": 51820,
+    "MTU": 1280,
+    "ConnectTimeout": "3m",
+    "KeepalivePeriod": "30s"
   }
 }
 ```
 
-`RouteTable: 0` enables automatic discovery from Linux policy routing rules.
-Set a table number explicitly only when discovery is ambiguous. Set
-`AdoptExistingRegistration: true` once when migrating a host that is already
-registered with the connector created for that Kubernetes Node.
+The state file contains the node's P-256 private key and Cloudflare registration
+response. It is written atomically with mode `0600` to the per-node host path.
+When the operator replaces a connector, `flanneld` replaces that registration
+automatically. `ConnectTimeout` covers initial connector enrollment and the
+first successful MASQUE session; startup fails if the tunnel is not usable.
 
 Helm example:
 
@@ -143,20 +151,12 @@ cloudflareMesh:
   enabled: true
   accountID: 0123456789abcdef0123456789abcdef
   clusterName: production
-  meshPod:
-    enabled: true
-    image:
-      repository: cloudflare/mesh
-      tag: latest
-      digest: ""
-      pullPolicy: IfNotPresent
-    stateHostPath: /var/lib/cloudflare-mesh
-    srcnatEnabled: false
-    memory:
-      request: 64Mi
-      limit: 200Mi
-      restartThreshold: 160Mi
-      checkPeriod: 60s
+  meshCIDR: 100.96.0.0/12
+  routeTable: 51820
+  mtu: 1280
+  keepalivePeriod: 30s
+  connectTimeout: 3m
+  stateHostPath: /var/lib/flannel/cloudflare-mesh
   coreDNSNodeHosts:
     enabled: true
     namespace: kube-system
@@ -183,17 +183,11 @@ operator also updates a content-hash annotation on the configured CoreDNS
 Deployment or DaemonSet so that each hosts-file change triggers one rollout.
 
 The Helm chart runs the operator with host networking so it can bootstrap a
-node before CNI is ready. Each Mesh Pod also uses host networking, is pinned to
-one node, persists its registration below `meshPod.stateHostPath`, and reads
-only that node's connector token. Flannel itself retains the chart's normal
-capability-only security context. Set `meshPod.srcnatEnabled: false` when every
-PodCIDR is published through Cloudflare Mesh and Pod source addresses must be
-preserved.
-
-For compatibility with host-installed Cloudflare One Client deployments, set
-`meshPod.enabled: false` and configure `WARPMode: host-cli`. That legacy mode
-uses `warp-cli` for enrollment and requires the Flannel container to enter the
-host namespaces.
+node before CNI is ready. The DaemonSet mounts `/dev/net/tun` and the state host
+path directly into `flanneld`; there is no transport sidecar or per-node
+transport Pod. On upgrade from the legacy implementation, delete Pods labeled
+`app.kubernetes.io/component=cloudflare-mesh-node` after deploying the native
+image because those Node-owned Pods are not Helm resources.
 
 ### TencentCloud VPC
 

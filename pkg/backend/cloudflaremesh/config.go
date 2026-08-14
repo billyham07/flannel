@@ -30,10 +30,11 @@ const (
 	defaultOperatorNS      = "kube-flannel"
 	defaultSecretPrefix    = "cloudflare-mesh-node-"
 	defaultStateFile       = "/var/lib/flannel/cloudflare-mesh/state.json"
-	defaultWARPCLI         = "warp-cli"
-	defaultWARPMode        = "host-cli"
-	defaultWARPInterface   = "CloudflareWARP"
+	defaultInterfaceName   = "flannel.mesh"
 	defaultMeshCIDR        = "100.96.0.0/12"
+	defaultRouteTable      = 51820
+	defaultMTU             = 1280
+	defaultKeepalive       = 30 * time.Second
 	defaultConnectTimeout  = 45 * time.Second
 	defaultBootstrapWait   = 2 * time.Minute
 	defaultReconcilePeriod = 30 * time.Second
@@ -43,27 +44,25 @@ const (
 )
 
 type config struct {
-	ControlPlaneMode          string   `json:"ControlPlaneMode"`
-	AccountID                 string   `json:"AccountID"`
-	APITokenFile              string   `json:"APITokenFile"`
-	APIBaseURL                string   `json:"APIBaseURL"`
-	NodeName                  string   `json:"NodeName"`
-	ConnectorID               string   `json:"ConnectorID"`
-	ConnectorHA               bool     `json:"ConnectorHA"`
-	OperatorNamespace         string   `json:"OperatorNamespace"`
-	OperatorSecretPrefix      string   `json:"OperatorSecretPrefix"`
-	Kubeconfig                string   `json:"Kubeconfig"`
-	BootstrapTimeout          string   `json:"BootstrapTimeout"`
-	AdoptExistingRegistration bool     `json:"AdoptExistingRegistration"`
-	StateFile                 string   `json:"StateFile"`
-	WARPCLI                   string   `json:"WARPCLI"`
-	WARPCLIArgs               []string `json:"WARPCLIArgs"`
-	WARPMode                  string   `json:"WARPMode"`
-	WARPInterface             string   `json:"WARPInterface"`
-	MeshCIDR                  string   `json:"MeshCIDR"`
-	RouteTable                int      `json:"RouteTable"`
-	ConnectTimeout            string   `json:"ConnectTimeout"`
-	ReconcilePeriod           string   `json:"ReconcilePeriod"`
+	ControlPlaneMode     string `json:"ControlPlaneMode"`
+	AccountID            string `json:"AccountID"`
+	APITokenFile         string `json:"APITokenFile"`
+	APIBaseURL           string `json:"APIBaseURL"`
+	NodeName             string `json:"NodeName"`
+	ConnectorID          string `json:"ConnectorID"`
+	ConnectorHA          bool   `json:"ConnectorHA"`
+	OperatorNamespace    string `json:"OperatorNamespace"`
+	OperatorSecretPrefix string `json:"OperatorSecretPrefix"`
+	Kubeconfig           string `json:"Kubeconfig"`
+	BootstrapTimeout     string `json:"BootstrapTimeout"`
+	StateFile            string `json:"StateFile"`
+	InterfaceName        string `json:"InterfaceName"`
+	MeshCIDR             string `json:"MeshCIDR"`
+	RouteTable           int    `json:"RouteTable"`
+	MTU                  int    `json:"MTU"`
+	ConnectTimeout       string `json:"ConnectTimeout"`
+	KeepalivePeriod      string `json:"KeepalivePeriod"`
+	ReconcilePeriod      string `json:"ReconcilePeriod"`
 }
 
 type runtimeConfig struct {
@@ -72,6 +71,7 @@ type runtimeConfig struct {
 	ConnectWait    time.Duration
 	BootstrapWait  time.Duration
 	ReconcileEvery time.Duration
+	KeepaliveEvery time.Duration
 }
 
 func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
@@ -82,10 +82,10 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 		OperatorNamespace:    defaultOperatorNS,
 		OperatorSecretPrefix: defaultSecretPrefix,
 		StateFile:            defaultStateFile,
-		WARPCLI:              defaultWARPCLI,
-		WARPMode:             defaultWARPMode,
-		WARPInterface:        defaultWARPInterface,
+		InterfaceName:        defaultInterfaceName,
 		MeshCIDR:             defaultMeshCIDR,
+		RouteTable:           defaultRouteTable,
+		MTU:                  defaultMTU,
 	}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
@@ -96,8 +96,14 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 	if cfg.ControlPlaneMode != "operator" && cfg.ControlPlaneMode != "direct" {
 		return nil, fmt.Errorf("ControlPlaneMode must be operator or direct, got %q", cfg.ControlPlaneMode)
 	}
-	if cfg.WARPMode != "host-cli" && cfg.WARPMode != "external" {
-		return nil, fmt.Errorf("WARPMode must be host-cli or external, got %q", cfg.WARPMode)
+	if cfg.InterfaceName == "" || len(cfg.InterfaceName) > 15 {
+		return nil, fmt.Errorf("InterfaceName must be 1-15 bytes")
+	}
+	if cfg.RouteTable <= 0 {
+		return nil, fmt.Errorf("RouteTable must be greater than zero")
+	}
+	if cfg.MTU < 1280 {
+		return nil, fmt.Errorf("MTU must be at least 1280")
 	}
 
 	if cfg.NodeName == "" {
@@ -148,12 +154,18 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 		return nil, err
 	}
 
+	keepaliveEvery, err := parseDuration(cfg.KeepalivePeriod, defaultKeepalive, "KeepalivePeriod")
+	if err != nil {
+		return nil, err
+	}
+
 	return &runtimeConfig{
 		config:         cfg,
 		APIToken:       token,
 		ConnectWait:    connectWait,
 		BootstrapWait:  bootstrapWait,
 		ReconcileEvery: reconcileEvery,
+		KeepaliveEvery: keepaliveEvery,
 	}, nil
 }
 
