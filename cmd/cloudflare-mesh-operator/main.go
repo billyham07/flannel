@@ -48,6 +48,7 @@ type options struct {
 	annotationPrefix        string
 	nodeSelector            string
 	syncPeriod              time.Duration
+	registrationGC          string
 	connectorHA             bool
 	coreDNSNodeHostsEnabled bool
 	coreDNSNamespace        string
@@ -87,6 +88,8 @@ func parseFlags() *options {
 	flag.StringVar(&opts.annotationPrefix, "annotation-prefix", meshapi.DefaultAnnotationPrefix, "Flannel Node annotation prefix")
 	flag.StringVar(&opts.nodeSelector, "node-selector", "", "Kubernetes label selector for managed nodes")
 	flag.DurationVar(&opts.syncPeriod, "sync-period", 15*time.Second, "Full reconciliation period")
+	flag.StringVar(&opts.registrationGC, "registration-gc", meshoperator.RegistrationGCDryRun,
+		"Reclaim WARP registrations orphaned by re-enrolled nodes: dryrun (log only), on, or off")
 	flag.BoolVar(&opts.connectorHA, "connector-ha", false, "Create Cloudflare Mesh nodes with HA enabled")
 	flag.BoolVar(&opts.coreDNSNodeHostsEnabled, "coredns-node-hosts-enabled", false, "Publish Node Mesh IP hostnames to a CoreDNS NodeHosts ConfigMap")
 	flag.StringVar(&opts.coreDNSNamespace, "coredns-namespace", "kube-system", "Namespace containing the CoreDNS NodeHosts ConfigMap")
@@ -134,6 +137,7 @@ func run(ctx context.Context, opts options) error {
 		AnnotationPrefix:        opts.annotationPrefix,
 		NodeSelector:            opts.nodeSelector,
 		SyncPeriod:              opts.syncPeriod,
+		RegistrationGC:          opts.registrationGC,
 		ConnectorHA:             opts.connectorHA,
 		CoreDNSNodeHostsEnabled: opts.coreDNSNodeHostsEnabled,
 		CoreDNSNamespace:        opts.coreDNSNamespace,

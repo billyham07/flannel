@@ -40,7 +40,14 @@ func NodeSecretName(prefix, nodeName string) string {
 }
 
 func ConnectorName(prefix, clusterName, nodeName string) string {
-	return boundedName(prefix+clusterName+"-"+nodeName, 64)
+	return boundedName(ConnectorNamePrefix(prefix, clusterName)+nodeName, 64)
+}
+
+// ConnectorNamePrefix is what marks a connector, and the device registration
+// enrolled against it, as belonging to this cluster. Garbage collection keys
+// off it, so anything without this prefix is left strictly alone.
+func ConnectorNamePrefix(prefix, clusterName string) string {
+	return prefix + clusterName + "-"
 }
 
 func RouteComment(clusterName, nodeName, network string) string {
