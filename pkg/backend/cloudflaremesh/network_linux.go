@@ -27,19 +27,37 @@ import (
 	log "k8s.io/klog/v2"
 )
 
+// pruneGrace is how long Run waits before it trusts its view of the cluster
+// enough to delete routes. WatchLeases stays silent when the local node is the
+// only one holding a lease, so an empty desired set is indistinguishable from
+// "the first snapshot has not arrived yet" until this has elapsed.
+const pruneGrace = time.Minute
+
+// meshTransport is the part of the MASQUE session meshNetwork owns for teardown.
+type meshTransport interface {
+	Close()
+}
+
 type meshNetwork struct {
 	lease          *lease.Lease
 	sm             subnet.Manager
 	routes         localRouteManager
+	transport      meshTransport
 	reconcileEvery time.Duration
+	now            func() time.Time
 	desiredMu      sync.Mutex
 	desired        map[string]struct{}
+	synced         bool
+	prunableAt     time.Time
 }
 
 func (n *meshNetwork) Lease() *lease.Lease { return n.lease }
 func (n *meshNetwork) MTU() int            { return n.routes.MTU() }
 
 func (n *meshNetwork) Run(ctx context.Context) {
+	defer n.shutdown()
+	n.prunableAt = n.clock().Add(pruneGrace)
+
 	events := make(chan []lease.Event)
 	go subnet.WatchLeases(ctx, n.sm, n.lease, events)
 	ticker := time.NewTicker(n.reconcileEvery)
@@ -60,44 +78,81 @@ func (n *meshNetwork) Run(ctx context.Context) {
 	}
 }
 
+// shutdown returns the host to its pre-flannel state. flanneld blocks on Run
+// through its WaitGroup before exiting, so this is the backend's only teardown
+// hook: routes go first because Cleanup must not race the disappearance of the
+// TUN device the transport owns.
+func (n *meshNetwork) shutdown() {
+	if err := n.routes.Cleanup(); err != nil {
+		log.Errorf("cloudflare-mesh: clean up routing state: %v", err)
+	}
+	if n.transport != nil {
+		n.transport.Close()
+	}
+}
+
+func (n *meshNetwork) clock() time.Time {
+	if n.now != nil {
+		return n.now()
+	}
+	return time.Now()
+}
+
 func (n *meshNetwork) handleEvents(batch []lease.Event) {
+	defer func() {
+		n.desiredMu.Lock()
+		n.synced = true
+		n.desiredMu.Unlock()
+	}()
 	for _, event := range batch {
 		if event.Lease.Attrs.BackendType != meshapi.BackendName {
 			log.Warningf("cloudflare-mesh: ignoring subnet %s from backend %q", event.Lease.Subnet, event.Lease.Attrs.BackendType)
 			continue
 		}
 		network := event.Lease.Subnet.String()
+		// The desired set is updated even when the netlink call fails: it
+		// records what the cluster wants, and the periodic reconcile is what
+		// retries. Dropping the entry here would strand the lease until it
+		// changed again.
 		switch event.Type {
 		case lease.EventAdded:
-			if err := n.routes.Ensure(network); err != nil {
-				log.Errorf("cloudflare-mesh: %v", err)
-				continue
-			}
 			n.desiredMu.Lock()
 			n.desired[network] = struct{}{}
 			n.desiredMu.Unlock()
-		case lease.EventRemoved:
-			if err := n.routes.Remove(network); err != nil {
+			if err := n.routes.Ensure(network); err != nil {
 				log.Errorf("cloudflare-mesh: %v", err)
-				continue
 			}
+		case lease.EventRemoved:
 			n.desiredMu.Lock()
 			delete(n.desired, network)
 			n.desiredMu.Unlock()
+			if err := n.routes.Remove(network); err != nil {
+				log.Errorf("cloudflare-mesh: %v", err)
+			}
 		}
 	}
 }
 
 func (n *meshNetwork) reconcile() {
 	n.desiredMu.Lock()
-	desired := make([]string, 0, len(n.desired))
+	desired := make(map[string]struct{}, len(n.desired))
 	for network := range n.desired {
-		desired = append(desired, network)
+		desired[network] = struct{}{}
 	}
+	synced := n.synced
 	n.desiredMu.Unlock()
-	for _, network := range desired {
-		if err := n.routes.Ensure(network); err != nil {
-			log.Errorf("cloudflare-mesh: reconcile route: %v", err)
+
+	// Pruning against a desired set we do not trust yet would blackhole every
+	// remote PodCIDR, so re-assert the known routes and wait.
+	if !synced && n.clock().Before(n.prunableAt) {
+		for network := range desired {
+			if err := n.routes.Ensure(network); err != nil {
+				log.Errorf("cloudflare-mesh: reconcile route: %v", err)
+			}
 		}
+		return
+	}
+	if err := n.routes.Reconcile(desired); err != nil {
+		log.Errorf("cloudflare-mesh: reconcile routes: %v", err)
 	}
 }
