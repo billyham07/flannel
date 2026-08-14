@@ -71,9 +71,12 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 		return nil, err
 	}
 
+	// Everything past this point owns a live TUN device and reconnect
+	// supervisor, so no error may return without tearing them down.
 	meshIP := transport.meshIP()
 	backendData, err := json.Marshal(meshapi.LeaseData{ConnectorID: connector.ID, MeshIP: meshIP.String()})
 	if err != nil {
+		transport.Close()
 		return nil, fmt.Errorf("encode cloudflare-mesh lease data: %w", err)
 	}
 	attrs := lease.LeaseAttrs{
@@ -83,15 +86,21 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 	}
 	localLease, err := b.sm.AcquireLease(ctx, &attrs)
 	if err != nil {
+		transport.Close()
 		return nil, fmt.Errorf("acquire cloudflare-mesh subnet lease: %w", err)
 	}
 	routes, err := newLocalRouteManager(cfg, meshIP, networkConfig.Network.String(), localLease.Subnet.String())
 	if err != nil {
+		transport.Close()
 		return nil, err
 	}
 	if api != nil {
 		comment := fmt.Sprintf("flannel:%s:%s", cfg.NodeName, localLease.Subnet)
 		if _, err := api.EnsureRoute(ctx, connector.ID, localLease.Subnet.String(), comment); err != nil {
+			if cleanupErr := routes.Cleanup(); cleanupErr != nil {
+				log.Errorf("cloudflare-mesh: clean up routing state: %v", cleanupErr)
+			}
+			transport.Close()
 			return nil, err
 		}
 	}
@@ -102,6 +111,7 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 		lease:          localLease,
 		sm:             b.sm,
 		routes:         routes,
+		transport:      transport,
 		reconcileEvery: cfg.ReconcileEvery,
 		desired:        make(map[string]struct{}),
 	}, nil

@@ -159,6 +159,9 @@ type nativeTransport struct {
 	cfg          *runtimeConfig
 	ready        chan struct{}
 	readyOnce    sync.Once
+	cancel       context.CancelFunc
+	done         chan struct{}
+	closeOnce    sync.Once
 }
 
 func startNativeTransport(ctx context.Context, cfg *runtimeConfig, connector *meshapi.ConnectorCredentials) (*nativeTransport, error) {
@@ -196,19 +199,52 @@ func startNativeTransport(ctx context.Context, cfg *runtimeConfig, connector *me
 		dev.Close()
 		return nil, fmt.Errorf("bring native Mesh TUN up: %w", err)
 	}
-	t := &nativeTransport{iface: dev, registration: state, privateKey: key, cfg: cfg, ready: make(chan struct{})}
-	go t.run(ctx)
+	// The session supervisor runs on its own cancellable context so Close can
+	// stop it even while the caller's context is still live, which is what the
+	// failure paths below and a backend teardown both need.
+	sessionCtx, cancel := context.WithCancel(ctx)
+	t := &nativeTransport{
+		iface: dev, registration: state, privateKey: key, cfg: cfg,
+		ready: make(chan struct{}), cancel: cancel, done: make(chan struct{}),
+	}
+	go t.run(sessionCtx)
 	timer := time.NewTimer(cfg.ConnectWait)
 	defer timer.Stop()
 	select {
 	case <-t.ready:
 		return t, nil
 	case <-ctx.Done():
+		t.Close()
 		return nil, ctx.Err()
 	case <-timer.C:
-		_ = dev.Close()
+		t.Close()
 		return nil, fmt.Errorf("connect native MASQUE tunnel: timed out after %s", cfg.ConnectWait)
 	}
+}
+
+// Close stops the reconnect supervisor and destroys the TUN device. It is
+// idempotent and waits for the supervisor to return, so callers can rely on
+// the interface being gone once it does.
+func (t *nativeTransport) Close() {
+	t.closeOnce.Do(func() {
+		select {
+		case <-t.ready:
+			// Best effort: without this Cloudflare keeps showing the connector
+			// as connected until its own session timeout expires.
+			reportCtx, cancelReport := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := t.reportDeviceState(reportCtx, "Disconnected", "masque"); err != nil {
+				log.Warningf("cloudflare-mesh: final device-state report failed: %v", err)
+			}
+			cancelReport()
+		default:
+		}
+
+		t.cancel()
+		// Unblocks the TUN reader, which cannot observe context cancellation
+		// while it is parked in Read.
+		_ = t.iface.Close()
+	})
+	<-t.done
 }
 
 func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.ConnectorCredentials) (meshRegistration, *ecdsa.PrivateKey, error) {
@@ -485,6 +521,9 @@ func (t *nativeTransport) meshIP() net.IP {
 }
 
 func (t *nativeTransport) run(ctx context.Context) {
+	// close(done) is deferred first so it runs last: Close blocks on it and
+	// must not observe the supervisor as finished before the TUN is gone.
+	defer close(t.done)
 	defer t.iface.Close()
 	outbound := make(chan []byte, 256)
 	go func() {
