@@ -67,23 +67,24 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 	if err != nil {
 		return nil, err
 	}
-	routes, err := newLocalRouteManager(cfg, transport.meshIP())
-	if err != nil {
-		return nil, err
-	}
 
-	backendData, err := json.Marshal(meshapi.LeaseData{ConnectorID: connector.ID, MeshIP: routes.MeshIP().String()})
+	meshIP := transport.meshIP()
+	backendData, err := json.Marshal(meshapi.LeaseData{ConnectorID: connector.ID, MeshIP: meshIP.String()})
 	if err != nil {
 		return nil, fmt.Errorf("encode cloudflare-mesh lease data: %w", err)
 	}
 	attrs := lease.LeaseAttrs{
-		PublicIP:    ip.FromIP(routes.MeshIP()),
+		PublicIP:    ip.FromIP(meshIP),
 		BackendType: meshapi.BackendName,
 		BackendData: backendData,
 	}
 	localLease, err := b.sm.AcquireLease(ctx, &attrs)
 	if err != nil {
 		return nil, fmt.Errorf("acquire cloudflare-mesh subnet lease: %w", err)
+	}
+	routes, err := newLocalRouteManager(cfg, meshIP, networkConfig.Network.String(), localLease.Subnet.String())
+	if err != nil {
+		return nil, err
 	}
 	if api != nil {
 		comment := fmt.Sprintf("flannel:%s:%s", cfg.NodeName, localLease.Subnet)

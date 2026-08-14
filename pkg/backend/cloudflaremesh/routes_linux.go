@@ -22,8 +22,17 @@ import (
 	"net"
 	"syscall"
 
+	coreiptables "github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
 )
+
+const hostSNATComment = "cloudflare-mesh hostNetwork SNAT"
+
+type iptablesClient interface {
+	Exists(table, chain string, rulespec ...string) (bool, error)
+	Insert(table, chain string, pos int, rulespec ...string) error
+	Delete(table, chain string, rulespec ...string) error
+}
 
 type localRouteManager interface {
 	Ensure(network string) error
@@ -34,13 +43,17 @@ type localRouteManager interface {
 }
 
 type netlinkRouteManager struct {
-	linkName string
-	meshIP   net.IP
-	mtu      int
-	table    int
+	linkName    string
+	meshIP      net.IP
+	mtu         int
+	table       int
+	clusterCIDR string
+	localCIDR   string
+	localSNATIP string
+	iptables    iptablesClient
 }
 
-func newLocalRouteManager(cfg *runtimeConfig, meshIP net.IP) (*netlinkRouteManager, error) {
+func newLocalRouteManager(cfg *runtimeConfig, meshIP net.IP, clusterCIDR, localCIDR string) (*netlinkRouteManager, error) {
 	link, err := netlink.LinkByName(cfg.InterfaceName)
 	if err != nil {
 		return nil, fmt.Errorf("find native Mesh interface %q: %w", cfg.InterfaceName, err)
@@ -52,12 +65,35 @@ func newLocalRouteManager(cfg *runtimeConfig, meshIP net.IP) (*netlinkRouteManag
 	if meshIP == nil || !meshNetwork.Contains(meshIP) {
 		return nil, fmt.Errorf("native Mesh address %v outside %s", meshIP, meshNetwork)
 	}
+	clusterNetwork, err := parseCIDR(clusterCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("parse cluster network: %w", err)
+	}
+	localNetwork, err := parseCIDR(localCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("parse local PodCIDR: %w", err)
+	}
+	if !clusterNetwork.Contains(localNetwork.IP) || !clusterNetwork.Contains(lastIPv4(localNetwork)) {
+		return nil, fmt.Errorf("local PodCIDR %s is outside cluster network %s", localNetwork, clusterNetwork)
+	}
+	localSNATIP, err := firstUsableIPv4(localNetwork)
+	if err != nil {
+		return nil, err
+	}
+	ipt, err := coreiptables.NewWithProtocol(coreiptables.ProtocolIPv4)
+	if err != nil {
+		return nil, fmt.Errorf("initialize hostNetwork SNAT: %w", err)
+	}
 	table := cfg.RouteTable
 	return &netlinkRouteManager{
-		linkName: link.Attrs().Name,
-		meshIP:   meshIP,
-		mtu:      link.Attrs().MTU,
-		table:    table,
+		linkName:    link.Attrs().Name,
+		meshIP:      meshIP,
+		mtu:         link.Attrs().MTU,
+		table:       table,
+		clusterCIDR: clusterNetwork.String(),
+		localCIDR:   localNetwork.String(),
+		localSNATIP: localSNATIP.String(),
+		iptables:    ipt,
 	}, nil
 }
 
@@ -85,6 +121,9 @@ func (m *netlinkRouteManager) Ensure(network string) error {
 	rule.Dst = dst
 	if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, syscall.EEXIST) {
 		return fmt.Errorf("ensure native Mesh policy rule for %s: %w", network, err)
+	}
+	if err := m.ensureHostSNAT(dst); err != nil {
+		return err
 	}
 	return nil
 }
@@ -122,7 +161,48 @@ func (m *netlinkRouteManager) Remove(network string) error {
 			}
 		}
 	}
+	return m.removeHostSNAT(dst)
+}
+
+func (m *netlinkRouteManager) ensureHostSNAT(dst *net.IPNet) error {
+	rule := m.hostSNATRule(dst)
+	exists, err := m.iptables.Exists("nat", "FLANNEL-POSTRTG", rule...)
+	if err != nil {
+		return fmt.Errorf("check hostNetwork SNAT for %s: %w", dst, err)
+	}
+	if exists {
+		return nil
+	}
+	if err := m.iptables.Insert("nat", "FLANNEL-POSTRTG", 2, rule...); err != nil {
+		return fmt.Errorf("ensure hostNetwork SNAT for %s: %w", dst, err)
+	}
 	return nil
+}
+
+func (m *netlinkRouteManager) removeHostSNAT(dst *net.IPNet) error {
+	rule := m.hostSNATRule(dst)
+	exists, err := m.iptables.Exists("nat", "FLANNEL-POSTRTG", rule...)
+	if err != nil {
+		return fmt.Errorf("check hostNetwork SNAT for %s: %w", dst, err)
+	}
+	if !exists {
+		return nil
+	}
+	if err := m.iptables.Delete("nat", "FLANNEL-POSTRTG", rule...); err != nil {
+		return fmt.Errorf("remove hostNetwork SNAT for %s: %w", dst, err)
+	}
+	return nil
+}
+
+func (m *netlinkRouteManager) hostSNATRule(dst *net.IPNet) []string {
+	return []string{
+		"!", "-s", m.clusterCIDR,
+		"-d", dst.String(),
+		"-m", "addrtype", "--src-type", "LOCAL",
+		"-o", m.linkName,
+		"-m", "comment", "--comment", hostSNATComment,
+		"-j", "SNAT", "--to-source", m.localSNATIP,
+	}
 }
 
 func (m *netlinkRouteManager) MeshIP() net.IP { return append(net.IP(nil), m.meshIP...) }
@@ -143,4 +223,29 @@ func parseCIDR(value string) (*net.IPNet, error) {
 
 func cidrsOverlap(first, second *net.IPNet) bool {
 	return first.Contains(second.IP) || second.Contains(first.IP)
+}
+
+func firstUsableIPv4(network *net.IPNet) (net.IP, error) {
+	if network == nil || network.IP.To4() == nil {
+		return nil, errors.New("local PodCIDR is not IPv4")
+	}
+	first := append(net.IP(nil), network.IP.To4()...)
+	for i := len(first) - 1; i >= 0; i-- {
+		first[i]++
+		if first[i] != 0 {
+			break
+		}
+	}
+	if !network.Contains(first) || first.Equal(lastIPv4(network)) {
+		return nil, fmt.Errorf("local PodCIDR %s has no usable gateway address", network)
+	}
+	return first, nil
+}
+
+func lastIPv4(network *net.IPNet) net.IP {
+	ip := append(net.IP(nil), network.IP.To4()...)
+	for i := range ip {
+		ip[i] |= ^network.Mask[i]
+	}
+	return ip
 }

@@ -94,6 +94,11 @@ a QUIC/HTTP3 MASQUE CONNECT-IP session, reconnects it, and reconciles remote
 PodCIDR routes in a dedicated Linux policy-routing table. It does not install
 or execute `warp-svc`, `warp-cli`, or a separate Cloudflare Mesh Pod.
 
+Traffic originating from the node or a `hostNetwork` Pod and destined for a
+remote PodCIDR is SNATed to the local PodCIDR gateway address. Cloudflare routes
+the reply to that PodCIDR; the connector's Mesh address is transport-only and
+is not used as a return-route identity.
+
 The `cloudflare-mesh-operator` is control-plane only. It creates one Cloudflare
 connector and one bootstrap Secret per Kubernetes Node, publishes the Node's
 ready Flannel PodCIDR through the Cloudflare route API, and removes resources
