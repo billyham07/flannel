@@ -53,15 +53,24 @@ import (
 	log "k8s.io/klog/v2"
 )
 
-const (
+// Base URLs are variables so tests can point them at a local server.
+var (
 	deviceAPIBase    = "https://api.devices.cloudflare.com"
 	zeroTrustAPIBase = "https://zero-trust-client.cloudflareclient.com"
-	registrationAPI  = "v0a974"
-	connectSNI       = "zt-masque.cloudflareclient.com"
-	connectURI       = "https://cloudflareaccess.com"
-	clientVersion    = "l-2026.7.974.2"
-	deviceVersion    = "2026.7.974.2"
-	gatewayID        = "03000200-0400-0500-0006-000700080009"
+)
+
+// errRegistrationGone reports that Cloudflare no longer knows about this
+// node's registration -- deleted from the dashboard, or reclaimed by the
+// operator's registration GC. It is recoverable: the node enrols again.
+var errRegistrationGone = errors.New("registration no longer exists at Cloudflare")
+
+const (
+	registrationAPI = "v0a974"
+	connectSNI      = "zt-masque.cloudflareclient.com"
+	connectURI      = "https://cloudflareaccess.com"
+	clientVersion   = "l-2026.7.974.2"
+	deviceVersion   = "2026.7.974.2"
+	gatewayID       = "03000200-0400-0500-0006-000700080009"
 )
 
 type registrationEnvelope struct {
@@ -251,6 +260,11 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 	if connector == nil || connector.ID == "" || strings.TrimSpace(connector.Token) == "" {
 		return meshRegistration{}, nil, errors.New("native Mesh connector credentials are incomplete")
 	}
+	name := registrationName(cfg, connector)
+	// superseded is the registration this node is about to abandon. Cloudflare
+	// keeps abandoned registrations forever, and each one holds a Mesh virtual
+	// IP, so it has to be deleted before the replacement is enrolled.
+	var superseded *meshRegistration
 	contents, err := os.ReadFile(cfg.StateFile)
 	if err == nil {
 		var state persistedRegistration
@@ -259,33 +273,55 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 		}
 		if state.ConnectorID != connector.ID {
 			log.Infof("cloudflare-mesh: connector changed from %s to %s; replacing native registration", state.ConnectorID, connector.ID)
+			superseded = &state.Registration
 		} else if state.PrivateKey == "" || state.Registration.ID == "" || state.Registration.Token == "" {
 			log.Infof("cloudflare-mesh: replacing legacy or incomplete state for connector %s", connector.ID)
+			superseded = &state.Registration
 		} else {
 			der, err := base64.StdEncoding.DecodeString(state.PrivateKey)
 			if err != nil {
 				log.Warningf("cloudflare-mesh: replacing state with invalid private key for connector %s: %v", connector.ID, err)
+				superseded = &state.Registration
 			} else if key, err := x509.ParseECPrivateKey(der); err != nil {
 				log.Warningf("cloudflare-mesh: replacing state with invalid private key for connector %s: %v", connector.ID, err)
+				superseded = &state.Registration
 			} else {
 				publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
 				if err != nil {
 					return meshRegistration{}, nil, err
 				}
 				client := &http.Client{Timeout: cfg.ConnectWait}
-				refreshed, err := refreshRegistration(ctx, client, state.Registration, publicDER, cfg.NodeName)
-				if err != nil {
+				refreshed, err := refreshRegistration(ctx, client, state.Registration, publicDER, name)
+				switch {
+				case err == nil:
+					state.Registration = refreshed
+					if err := writePrivateJSON(cfg.StateFile, &state); err != nil {
+						return meshRegistration{}, nil, err
+					}
+					return refreshed, key, nil
+				case errors.Is(err, errRegistrationGone):
+					// Enrol again rather than refusing to start. superseded is
+					// deliberately left nil: there is nothing to delete, and
+					// the stale token would not authorise the call anyway.
+					log.Infof("cloudflare-mesh: registration %s is gone at Cloudflare; enrolling a replacement: %v",
+						state.Registration.ID, err)
+				default:
 					return meshRegistration{}, nil, err
 				}
-				state.Registration = refreshed
-				if err := writePrivateJSON(cfg.StateFile, &state); err != nil {
-					return meshRegistration{}, nil, err
-				}
-				return refreshed, key, nil
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return meshRegistration{}, nil, fmt.Errorf("read native Mesh state: %w", err)
+	}
+	if superseded != nil {
+		// Best effort only. If it fails the operator's registration GC still
+		// reclaims the virtual IP on its next sweep, so a dead control-plane
+		// endpoint must not stop this node from coming up.
+		if err := deleteRegistration(ctx, &http.Client{Timeout: cfg.ConnectWait}, *superseded); err != nil {
+			log.Warningf("cloudflare-mesh: could not delete superseded registration %s: %v", superseded.ID, err)
+		} else {
+			log.Infof("cloudflare-mesh: deleted superseded registration %s", superseded.ID)
+		}
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -300,7 +336,7 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 		return meshRegistration{}, nil, err
 	}
 	payload := registrationPayload{
-		Type: "linux", Model: "WO4 Default string", Name: cfg.NodeName,
+		Type: "linux", Model: "WO4 Default string", Name: name,
 		Key: base64.StdEncoding.EncodeToString(publicDER), TOS: time.Now().UTC().Format(time.RFC3339Nano),
 		GatewayDeviceID: gatewayID, OSVersion: "6.12.74", SerialNumber: "Default string",
 		WarpConnectorToken: connector.Token, KeyType: "secp256r1", TunnelType: "masque",
@@ -338,7 +374,7 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 	if strings.TrimSpace(envelope.Result.Token) == "" {
 		return meshRegistration{}, nil, errors.New("Cloudflare connector enrollment returned no device token")
 	}
-	refreshed, err := refreshRegistration(ctx, client, envelope.Result, publicDER, cfg.NodeName)
+	refreshed, err := refreshRegistration(ctx, client, envelope.Result, publicDER, name)
 	if err != nil {
 		return meshRegistration{}, nil, err
 	}
@@ -380,8 +416,8 @@ func refreshRegistration(ctx context.Context, client *http.Client, registration 
 	if err != nil {
 		return meshRegistration{}, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return meshRegistration{}, fmt.Errorf("refresh native Mesh registration: HTTP %d", resp.StatusCode)
+	if err := registrationRefreshError(resp.StatusCode); err != nil {
+		return meshRegistration{}, err
 	}
 	var refreshed meshRegistration
 	if err := json.Unmarshal(raw, &refreshed); err != nil {
@@ -393,6 +429,63 @@ func refreshRegistration(ctx context.Context, client *http.Client, registration 
 	// The PATCH response intentionally omits the bearer token.
 	refreshed.Token = registration.Token
 	return refreshed, nil
+}
+
+// registrationName is what this node shows up as in the Cloudflare device
+// list. It reuses the operator's connector name rather than the bare hostname
+// on purpose: the operator garbage-collects registrations by that prefix, and
+// a bare hostname could collide with a real user device that must never be
+// deleted. Existing registrations are renamed in place by refreshRegistration
+// on the next start, so no re-enrolment is needed.
+func registrationName(cfg *runtimeConfig, connector *meshapi.ConnectorCredentials) string {
+	if connector != nil && strings.TrimSpace(connector.Name) != "" {
+		return connector.Name
+	}
+	return cfg.NodeName
+}
+
+// deleteRegistration releases a registration and its Mesh virtual IP. It is
+// the counterpart of the PATCH in refreshRegistration and uses the device's
+// own bearer token, so it works without the account API token.
+func deleteRegistration(ctx context.Context, client *http.Client, registration meshRegistration) error {
+	if registration.ID == "" || strings.TrimSpace(registration.Token) == "" {
+		return errors.New("registration is incomplete")
+	}
+	endpoint := zeroTrustAPIBase + "/" + registrationAPI + "/reg/" + registration.ID
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	setDeviceAPIHeaders(req, registration.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	// A registration deleted out of band is the outcome we wanted anyway.
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return nil
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// registrationRefreshError classifies a PATCH /reg/{id} response. A
+// registration that has been deleted answers for the device token as well as
+// the record, so 401 and 403 mean the same thing here as 404: this node's
+// identity is gone and has to be re-established.
+func registrationRefreshError(statusCode int) error {
+	switch statusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusNotFound, http.StatusGone, http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("%w (HTTP %d)", errRegistrationGone, statusCode)
+	default:
+		return fmt.Errorf("refresh native Mesh registration: HTTP %d", statusCode)
+	}
 }
 
 func deviceRegistrationID(value string) string {

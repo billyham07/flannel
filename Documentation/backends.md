@@ -104,6 +104,18 @@ connector and one bootstrap Secret per Kubernetes Node, publishes the Node's
 ready Flannel PodCIDR through the Cloudflare route API, and removes resources
 owned by deleted Nodes. `flanneld` reads only its own connector token.
 
+Each node also holds a Cloudflare WARP *device registration*, which owns its
+Mesh virtual IP. `flanneld` deletes its own registration before enrolling a
+replacement, so a changed connector does not leak one. That is not possible
+when the state file itself was lost, because nothing on the node remembers the
+old registration; `-registration-gc` on the operator reclaims those. It only
+ever considers registrations named with this cluster's connector prefix, and
+ignores any registration created within the last 30 minutes so that a node
+which has enrolled but not yet published its Mesh IP is never collected. The
+default is `dryrun`, which logs what it would delete without deleting
+anything; set it to `on` once the log looks right, or `off` to disable the
+feature and its API calls entirely.
+
 This backend is currently IPv4-only.
 
 Requirements:
@@ -113,7 +125,9 @@ Requirements:
   No host Cloudflare One Client package is required.
 * Configure the Cloudflare account for Mesh connectivity and create an API
   token with `Cloudflare One Networks Write` and `Cloudflare One Connectors
-  Write` (or `Cloudflare One Connector: WARP Write`) permissions.
+  Write` (or `Cloudflare One Connector: WARP Write`) permissions. Running the
+  operator with `-registration-gc` set to `dryrun` or `on` additionally
+  requires a device-registration read/write permission on the same token.
 * Install the standard CNI plugins, including `bridge`, `host-local`,
   `loopback`, and `portmap`, in `flannel.cniBinDir` on every node. The Flannel
   CNI image installs only the `flannel` binary.

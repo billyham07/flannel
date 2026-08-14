@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -116,6 +118,48 @@ func TestEnsureRouteIsIdempotent(t *testing.T) {
 	}
 	if route.ID != "route-1" || createCalls != 0 {
 		t.Fatalf("route was not reused: route=%#v creates=%d", route, createCalls)
+	}
+}
+
+// The registrations endpoint rejects per_page above 100 -- unlike every other
+// endpoint this client talks to -- so paging has to be real, not a single
+// oversized request.
+func TestListDeviceRegistrationsPagesWithinTheServerLimit(t *testing.T) {
+	var pages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		perPage, err := strconv.Atoi(r.URL.Query().Get("per_page"))
+		if err != nil || perPage < 1 || perPage > 100 {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"success":false,"errors":[{"code":2750,"message":"invalid query parameter 'per_page': must be between 1 and 100"}]}`)
+			return
+		}
+		cursor := r.URL.Query().Get("cursor")
+		pages = append(pages, cursor)
+		switch cursor {
+		case "":
+			fmt.Fprint(w, `{"success":true,"result":[{"id":"a","virtual_ipv4":"100.96.0.1","device":{"name":"one"}}],"result_info":{"cursor":"next"}}`)
+		default:
+			fmt.Fprint(w, `{"success":true,"result":[{"id":"b","virtual_ipv4":"100.96.0.2","device":{"name":"two"}}],"result_info":{"cursor":""}}`)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "account", "token", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrations, err := client.ListDeviceRegistrations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations) != 2 || registrations[0].ID != "a" || registrations[1].ID != "b" {
+		t.Fatalf("registrations = %+v, want both pages in order", registrations)
+	}
+	if registrations[1].Name() != "two" {
+		t.Fatalf("device name = %q, want %q", registrations[1].Name(), "two")
+	}
+	if want := []string{"", "next"}; !reflect.DeepEqual(pages, want) {
+		t.Fatalf("cursors requested = %v, want %v", pages, want)
 	}
 }
 

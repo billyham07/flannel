@@ -16,7 +16,10 @@ package cloudflaremeshoperator
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -29,11 +32,15 @@ import (
 )
 
 type fakeMeshAPI struct {
-	connectors        map[string]*meshapi.ConnectorCredentials
-	routes            []meshapi.Route
-	ensureRoutes      int
-	deleted           []string
-	deletedConnectors []string
+	connectors           map[string]*meshapi.ConnectorCredentials
+	routes               []meshapi.Route
+	registrations        []meshapi.DeviceRegistration
+	ensureRoutes         int
+	deleted              []string
+	deletedConnectors    []string
+	deletedRegistrations []string
+	listedRegistrations  int
+	listErr              error
 }
 
 func (f *fakeMeshAPI) EnsureConnector(_ context.Context, connectorID, name string, _ bool) (*meshapi.ConnectorCredentials, error) {
@@ -95,6 +102,147 @@ func (f *fakeMeshAPI) DeleteRoute(_ context.Context, routeID string) error {
 		}
 	}
 	return nil
+}
+
+func (f *fakeMeshAPI) ListDeviceRegistrations(_ context.Context) ([]meshapi.DeviceRegistration, error) {
+	f.listedRegistrations++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return append([]meshapi.DeviceRegistration(nil), f.registrations...), nil
+}
+
+func (f *fakeMeshAPI) DeleteDeviceRegistration(_ context.Context, registrationID string) error {
+	f.deletedRegistrations = append(f.deletedRegistrations, registrationID)
+	for i := range f.registrations {
+		if f.registrations[i].ID == registrationID {
+			f.registrations = append(f.registrations[:i], f.registrations[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func newRegistration(id, name, virtualIP string, age time.Duration, now time.Time) meshapi.DeviceRegistration {
+	registration := meshapi.DeviceRegistration{ID: id, VirtualIPv4: virtualIP, CreatedAt: now.Add(-age)}
+	registration.Device.Name = name
+	return registration
+}
+
+// The node's own registration must survive; the one it abandoned must not; and
+// anything without this cluster's prefix must never be touched, however old.
+func TestReconcileCollectsOrphanedRegistrations(t *testing.T) {
+	now := time.Now()
+	kube, api := registrationGCFixture(t, now)
+	op := newRegistrationGCOperator(t, kube, api, RegistrationGCOn, now)
+
+	if err := op.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{"reg-orphan"}; !reflect.DeepEqual(api.deletedRegistrations, want) {
+		t.Fatalf("deleted registrations = %v, want %v", api.deletedRegistrations, want)
+	}
+	remaining := make([]string, 0, len(api.registrations))
+	for i := range api.registrations {
+		remaining = append(remaining, api.registrations[i].ID)
+	}
+	slices.Sort(remaining)
+	if want := []string{"reg-fresh", "reg-live", "reg-unmanaged"}; !reflect.DeepEqual(remaining, want) {
+		t.Fatalf("surviving registrations = %v, want %v", remaining, want)
+	}
+}
+
+func TestRegistrationGCDryRunDeletesNothing(t *testing.T) {
+	now := time.Now()
+	kube, api := registrationGCFixture(t, now)
+	op := newRegistrationGCOperator(t, kube, api, RegistrationGCDryRun, now)
+
+	if err := op.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deletedRegistrations) != 0 {
+		t.Fatalf("dry run deleted %v", api.deletedRegistrations)
+	}
+}
+
+// Off must cost nothing: no listing either, so a cluster that does not want
+// this feature never needs the extra API token permission.
+func TestRegistrationGCOffSkipsTheListCall(t *testing.T) {
+	now := time.Now()
+	kube, api := registrationGCFixture(t, now)
+	op := newRegistrationGCOperator(t, kube, api, RegistrationGCOff, now)
+
+	if err := op.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if api.listedRegistrations != 0 {
+		t.Fatalf("listed registrations %d times while off", api.listedRegistrations)
+	}
+	if len(api.deletedRegistrations) != 0 {
+		t.Fatalf("GC ran while off: %v", api.deletedRegistrations)
+	}
+}
+
+// The Zero Trust scope is the only permission this loop needs beyond the
+// connector ones, so a token that lacks it must degrade to "no GC" rather than
+// wedge every reconcile.
+func TestRegistrationGCFailureDoesNotFailReconcile(t *testing.T) {
+	now := time.Now()
+	kube, api := registrationGCFixture(t, now)
+	api.listErr = errors.New("Cloudflare API HTTP 403: 10000: Authentication error")
+	op := newRegistrationGCOperator(t, kube, api, RegistrationGCOn, now)
+
+	if err := op.Reconcile(context.Background()); err != nil {
+		t.Fatalf("registration GC failure broke reconcile: %v", err)
+	}
+}
+
+func TestNewRejectsUnknownRegistrationGCMode(t *testing.T) {
+	_, err := New(fake.NewClientset(), &fakeMeshAPI{connectors: map[string]*meshapi.ConnectorCredentials{}}, Config{
+		Namespace: "kube-flannel", SecretPrefix: "mesh-", ClusterName: "test", RegistrationGC: "sometimes",
+	})
+	if err == nil {
+		t.Fatal("expected an unknown registration GC mode to be rejected")
+	}
+}
+
+func registrationGCFixture(t *testing.T, now time.Time) (*fake.Clientset, *fakeMeshAPI) {
+	t.Helper()
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-a",
+			UID:  types.UID("uid-a"),
+			Annotations: map[string]string{
+				meshapi.DefaultAnnotationPrefix + "/backend-type": meshapi.BackendName,
+				meshapi.DefaultAnnotationPrefix + "/backend-data": `{"connectorID":"id-flannel-test-node-a","meshIP":"100.96.0.8"}`,
+			},
+		},
+		Spec: corev1.NodeSpec{PodCIDR: "10.10.1.0/24", PodCIDRs: []string{"10.10.1.0/24"}},
+	}
+	api := &fakeMeshAPI{
+		connectors: map[string]*meshapi.ConnectorCredentials{},
+		registrations: []meshapi.DeviceRegistration{
+			newRegistration("reg-live", "flannel-test-node-a", "100.96.0.8", 24*time.Hour, now),
+			newRegistration("reg-orphan", "flannel-test-node-a", "100.96.0.7", 24*time.Hour, now),
+			newRegistration("reg-fresh", "flannel-test-node-b", "100.96.0.9", time.Minute, now),
+			newRegistration("reg-unmanaged", "someones-laptop", "100.96.0.6", 90*24*time.Hour, now),
+		},
+	}
+	return fake.NewClientset(node), api
+}
+
+func newRegistrationGCOperator(t *testing.T, kube *fake.Clientset, api *fakeMeshAPI, mode string, now time.Time) *Operator {
+	t.Helper()
+	op, err := New(kube, api, Config{
+		Namespace: "kube-flannel", SecretPrefix: "mesh-", ClusterName: "test",
+		ConnectorPrefix: "flannel-", SyncPeriod: time.Second, RegistrationGC: mode,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.clock = func() time.Time { return now }
+	return op
 }
 
 func TestReconcileBootstrapsNodeEnsuresRouteAndGarbageCollects(t *testing.T) {
