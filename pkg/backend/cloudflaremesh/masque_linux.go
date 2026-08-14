@@ -54,11 +54,14 @@ import (
 )
 
 const (
-	deviceAPIBase = "https://api.devices.cloudflare.com"
-	connectSNI    = "zt-masque.cloudflareclient.com"
-	connectURI    = "https://cloudflareaccess.com"
-	clientVersion = "l-2026.6.880.0"
-	gatewayID     = "03000200-0400-0500-0006-000700080009"
+	deviceAPIBase    = "https://api.devices.cloudflare.com"
+	zeroTrustAPIBase = "https://zero-trust-client.cloudflareclient.com"
+	registrationAPI  = "v0a974"
+	connectSNI       = "zt-masque.cloudflareclient.com"
+	connectURI       = "https://cloudflareaccess.com"
+	clientVersion    = "l-2026.7.974.2"
+	deviceVersion    = "2026.7.974.2"
+	gatewayID        = "03000200-0400-0500-0006-000700080009"
 )
 
 type registrationEnvelope struct {
@@ -72,6 +75,7 @@ type registrationEnvelope struct {
 
 type meshRegistration struct {
 	ID          string `json:"id"`
+	Token       string `json:"token,omitempty"`
 	IsConnector bool   `json:"is_connector"`
 	Account     struct {
 		ID           string `json:"id"`
@@ -95,6 +99,9 @@ type meshRegistration struct {
 			} `json:"endpoint"`
 		} `json:"peers"`
 	} `json:"config"`
+	Policy struct {
+		ID string `json:"policy_id"`
+	} `json:"policy"`
 }
 
 type persistedRegistration struct {
@@ -115,6 +122,34 @@ type registrationPayload struct {
 	WarpConnectorToken string `json:"warp_connector_token"`
 	KeyType            string `json:"key_type"`
 	TunnelType         string `json:"tunnel_type"`
+}
+
+type registrationUpdate struct {
+	Key        string `json:"key"`
+	KeyType    string `json:"key_type"`
+	TunnelType string `json:"tunnel_type"`
+	Name       string `json:"name,omitempty"`
+}
+
+type deviceStatePayload struct {
+	Timestamp          string         `json:"timestamp"`
+	AccountID          string         `json:"account_id"`
+	Status             string         `json:"status"`
+	Mode               string         `json:"mode"`
+	AlwaysOn           bool           `json:"always_on"`
+	RegistrationID     string         `json:"reg_id"`
+	DOHSubdomain       string         `json:"doh_subdomain"`
+	SwitchLocked       bool           `json:"switch_locked"`
+	ClientVersion      string         `json:"client_version"`
+	ClientPlatform     string         `json:"client_platform"`
+	WarpMetal          string         `json:"warp_metal"`
+	WarpColo           string         `json:"warp_colo"`
+	HandshakeLatencyMS *int           `json:"handshake_latency_ms"`
+	EstimatedLoss      *float64       `json:"estimated_loss"`
+	TunnelType         string         `json:"tunnel_type"`
+	Interfaces         []any          `json:"interfaces"`
+	Firewalls          map[string]any `json:"firewalls"`
+	ProfileID          string         `json:"profile_id,omitempty"`
 }
 
 type nativeTransport struct {
@@ -188,7 +223,7 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 		}
 		if state.ConnectorID != connector.ID {
 			log.Infof("cloudflare-mesh: connector changed from %s to %s; replacing native registration", state.ConnectorID, connector.ID)
-		} else if state.PrivateKey == "" || state.Registration.ID == "" {
+		} else if state.PrivateKey == "" || state.Registration.ID == "" || state.Registration.Token == "" {
 			log.Infof("cloudflare-mesh: replacing legacy or incomplete state for connector %s", connector.ID)
 		} else {
 			der, err := base64.StdEncoding.DecodeString(state.PrivateKey)
@@ -197,7 +232,20 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 			} else if key, err := x509.ParseECPrivateKey(der); err != nil {
 				log.Warningf("cloudflare-mesh: replacing state with invalid private key for connector %s: %v", connector.ID, err)
 			} else {
-				return state.Registration, key, nil
+				publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+				if err != nil {
+					return meshRegistration{}, nil, err
+				}
+				client := &http.Client{Timeout: cfg.ConnectWait}
+				refreshed, err := refreshRegistration(ctx, client, state.Registration, publicDER, cfg.NodeName)
+				if err != nil {
+					return meshRegistration{}, nil, err
+				}
+				state.Registration = refreshed
+				if err := writePrivateJSON(cfg.StateFile, &state); err != nil {
+					return meshRegistration{}, nil, err
+				}
+				return refreshed, key, nil
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -251,6 +299,14 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 	if resp.StatusCode != http.StatusOK || !envelope.Success || !envelope.Result.IsConnector || envelope.Result.Account.AccountType != "team" {
 		return meshRegistration{}, nil, fmt.Errorf("Cloudflare rejected native connector enrollment: HTTP %d connector=%t account=%q", resp.StatusCode, envelope.Result.IsConnector, envelope.Result.Account.AccountType)
 	}
+	if strings.TrimSpace(envelope.Result.Token) == "" {
+		return meshRegistration{}, nil, errors.New("Cloudflare connector enrollment returned no device token")
+	}
+	refreshed, err := refreshRegistration(ctx, client, envelope.Result, publicDER, cfg.NodeName)
+	if err != nil {
+		return meshRegistration{}, nil, err
+	}
+	envelope.Result = refreshed
 	privateDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
 		return meshRegistration{}, nil, err
@@ -260,6 +316,104 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 		return meshRegistration{}, nil, err
 	}
 	return envelope.Result, key, nil
+}
+
+func refreshRegistration(ctx context.Context, client *http.Client, registration meshRegistration, publicDER []byte, nodeName string) (meshRegistration, error) {
+	payload := registrationUpdate{
+		Key:        base64.StdEncoding.EncodeToString(publicDER),
+		KeyType:    "secp256r1",
+		TunnelType: "masque",
+		Name:       nodeName,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return meshRegistration{}, err
+	}
+	endpoint := zeroTrustAPIBase + "/" + registrationAPI + "/reg/" + registration.ID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return meshRegistration{}, err
+	}
+	setDeviceAPIHeaders(req, registration.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return meshRegistration{}, fmt.Errorf("refresh native Mesh registration: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return meshRegistration{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return meshRegistration{}, fmt.Errorf("refresh native Mesh registration: HTTP %d", resp.StatusCode)
+	}
+	var refreshed meshRegistration
+	if err := json.Unmarshal(raw, &refreshed); err != nil {
+		return meshRegistration{}, fmt.Errorf("decode refreshed native Mesh registration: %w", err)
+	}
+	if refreshed.ID == "" || len(refreshed.Config.Peers) == 0 || refreshed.Policy.ID == "" {
+		return meshRegistration{}, errors.New("refreshed native Mesh registration is incomplete")
+	}
+	// The PATCH response intentionally omits the bearer token.
+	refreshed.Token = registration.Token
+	return refreshed, nil
+}
+
+func deviceRegistrationID(value string) string {
+	return strings.TrimPrefix(strings.TrimSpace(value), "t.")
+}
+
+func setDeviceAPIHeaders(req *http.Request, token string) {
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("CF-Client-Version", clientVersion)
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", "WARP for Linux")
+}
+
+func (t *nativeTransport) reportDeviceState(ctx context.Context, status, tunnelType string) error {
+	accountID := t.registration.Account.ID
+	if accountID == "" || t.registration.ID == "" || t.registration.Token == "" {
+		return errors.New("native Mesh registration cannot report device state")
+	}
+	payload := deviceStatePayload{
+		Timestamp:      time.Now().UTC().Format(time.RFC3339Nano),
+		AccountID:      accountID,
+		Status:         status,
+		Mode:           "warp+doh",
+		AlwaysOn:       true,
+		RegistrationID: deviceRegistrationID(t.registration.ID),
+		DOHSubdomain:   accountID + ".cloudflare-gateway.com",
+		ClientVersion:  deviceVersion,
+		ClientPlatform: "linux",
+		WarpMetal:      "none",
+		WarpColo:       "none",
+		TunnelType:     tunnelType,
+		Interfaces:     []any{},
+		Firewalls:      map[string]any{},
+		ProfileID:      t.registration.Policy.ID,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	endpoint := zeroTrustAPIBase + "/v0/accounts/" + accountID + "/reg/" + deviceRegistrationID(t.registration.ID) + "/devicestate"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	setDeviceAPIHeaders(req, t.registration.Token)
+	client := &http.Client{Timeout: t.cfg.ConnectWait}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("report native Mesh device state %s: %w", status, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("report native Mesh device state %s: HTTP %d", status, resp.StatusCode)
+	}
+	return nil
 }
 
 func connectorAccountID(token string) (string, error) {
@@ -349,6 +503,9 @@ func (t *nativeTransport) run(ctx context.Context) {
 		}
 	}()
 	delay := time.Second
+	if err := t.reportDeviceState(ctx, "Connecting", "masque"); err != nil {
+		log.Warningf("cloudflare-mesh: initial device-state report failed: %v", err)
+	}
 	for ctx.Err() == nil {
 		err := t.runSession(ctx, outbound)
 		if ctx.Err() != nil {
@@ -406,37 +563,27 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 	if parsed, _, err := net.SplitHostPort(host); err == nil {
 		host = parsed
 	}
-	endpoint := &net.UDPAddr{IP: net.ParseIP(host), Port: 443}
-	if endpoint.IP == nil {
+	endpointIP := net.ParseIP(host)
+	if endpointIP == nil {
 		return fmt.Errorf("invalid MASQUE endpoint %q", peer.Endpoint.V4)
 	}
-	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	endpoint := &net.UDPAddr{IP: endpointIP, Port: 443}
+	tunnelType := "masque"
+	ipConn, response, closeSession, err := dialHTTP3(ctx, tlsConfig, endpoint, t.cfg.KeepaliveEvery)
 	if err != nil {
 		return err
 	}
-	defer udpConn.Close()
-	qtr := &quic.Transport{Conn: udpConn, ConnectionIDLength: 20}
-	defer qtr.Close()
-	qconn, err := qtr.Dial(ctx, endpoint, tlsConfig, &quic.Config{EnableDatagrams: true, KeepAlivePeriod: t.cfg.KeepaliveEvery})
-	if err != nil {
-		return err
-	}
-	defer qconn.CloseWithError(0, "reconnect")
-	h3 := &http3.Transport{EnableDatagrams: true, DisableCompression: true, AdditionalSettings: map[uint64]uint64{0x276: 1}}
-	defer h3.Close()
-	hconn := h3.NewClientConn(qconn)
-	ipConn, response, err := connectip.Dial(ctx, hconn, uritemplate.MustNew(connectURI), "cf-connect-ip", http.Header{"User-Agent": []string{""}}, true)
-	if err != nil {
-		return err
-	}
-	defer ipConn.Close()
+	defer closeSession()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("CONNECT-IP returned %s", response.Status)
 	}
+	if err := t.reportDeviceState(ctx, "Connected", tunnelType); err != nil {
+		return err
+	}
 	t.readyOnce.Do(func() { close(t.ready) })
-	log.Infof("cloudflare-mesh: native MASQUE connected to %s", endpoint)
+	log.Infof("cloudflare-mesh: native CONNECT-IP connected over %s to %s", tunnelType, endpoint)
 	sessionCtx, cancelSession := context.WithCancel(ctx)
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	var pumps sync.WaitGroup
 	pumps.Add(2)
 	go func() {
@@ -466,6 +613,20 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 		}
 	}()
 	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sessionCtx.Done():
+				return
+			case <-ticker.C:
+				if err := t.reportDeviceState(sessionCtx, "Connected", tunnelType); err != nil {
+					log.Warningf("cloudflare-mesh: periodic device-state report failed: %v", err)
+				}
+			}
+		}
+	}()
+	go func() {
 		defer pumps.Done()
 		for {
 			packet, err := ipConn.ReadPacketZeroCopy(true)
@@ -484,6 +645,38 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 	_ = ipConn.Close()
 	pumps.Wait()
 	return sessionErr
+}
+
+func dialHTTP3(ctx context.Context, tlsConfig *tls.Config, endpoint *net.UDPAddr, keepalive time.Duration) (*connectip.Conn, *http.Response, func(), error) {
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	qtr := &quic.Transport{Conn: udpConn, ConnectionIDLength: 20}
+	qconn, err := qtr.Dial(ctx, endpoint, tlsConfig, &quic.Config{EnableDatagrams: true, KeepAlivePeriod: keepalive})
+	if err != nil {
+		_ = qtr.Close()
+		_ = udpConn.Close()
+		return nil, nil, func() {}, err
+	}
+	h3 := &http3.Transport{EnableDatagrams: true, DisableCompression: true, AdditionalSettings: map[uint64]uint64{0x276: 1}}
+	hconn := h3.NewClientConn(qconn)
+	ipConn, response, err := connectip.Dial(ctx, hconn, uritemplate.MustNew(connectURI), "cf-connect-ip", http.Header{"User-Agent": []string{""}}, true)
+	if err != nil {
+		_ = h3.Close()
+		_ = qconn.CloseWithError(0, "connect-ip dial failed")
+		_ = qtr.Close()
+		_ = udpConn.Close()
+		return nil, nil, func() {}, err
+	}
+	cleanup := func() {
+		_ = ipConn.Close()
+		_ = h3.Close()
+		_ = qconn.CloseWithError(0, "reconnect")
+		_ = qtr.Close()
+		_ = udpConn.Close()
+	}
+	return ipConn, response, cleanup, nil
 }
 
 func parseEndpointKey(value string) (*ecdsa.PublicKey, error) {
