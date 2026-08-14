@@ -26,7 +26,6 @@ import (
 
 	meshapi "github.com/flannel-io/flannel/pkg/cloudflaremesh"
 	meshoperator "github.com/flannel-io/flannel/pkg/cloudflaremeshoperator"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes"
@@ -50,16 +49,6 @@ type options struct {
 	nodeSelector            string
 	syncPeriod              time.Duration
 	connectorHA             bool
-	meshPodEnabled          bool
-	meshPodImage            string
-	meshPodPullPolicy       string
-	meshPodNamePrefix       string
-	meshStateHostPath       string
-	meshSRCNATEnabled       bool
-	meshPodMemoryRequest    string
-	meshPodMemoryLimit      string
-	meshPodMemoryRestartAt  string
-	meshPodMemoryCheckEvery time.Duration
 	coreDNSNodeHostsEnabled bool
 	coreDNSNamespace        string
 	coreDNSConfigMapName    string
@@ -99,16 +88,6 @@ func parseFlags() *options {
 	flag.StringVar(&opts.nodeSelector, "node-selector", "", "Kubernetes label selector for managed nodes")
 	flag.DurationVar(&opts.syncPeriod, "sync-period", 15*time.Second, "Full reconciliation period")
 	flag.BoolVar(&opts.connectorHA, "connector-ha", false, "Create Cloudflare Mesh nodes with HA enabled")
-	flag.BoolVar(&opts.meshPodEnabled, "mesh-pod-enabled", false, "Manage one containerized Cloudflare Mesh Pod per node")
-	flag.StringVar(&opts.meshPodImage, "mesh-pod-image", "cloudflare/mesh:latest", "Container image for per-node Cloudflare Mesh Pods")
-	flag.StringVar(&opts.meshPodPullPolicy, "mesh-pod-image-pull-policy", string(corev1.PullIfNotPresent), "Image pull policy for Cloudflare Mesh Pods")
-	flag.StringVar(&opts.meshPodNamePrefix, "mesh-pod-name-prefix", "cloudflare-mesh-node-", "Per-node Cloudflare Mesh Pod name prefix")
-	flag.StringVar(&opts.meshStateHostPath, "mesh-state-host-path", "/var/lib/cloudflare-mesh", "Host path root for per-connector Cloudflare Mesh registration state")
-	flag.BoolVar(&opts.meshSRCNATEnabled, "mesh-srcnat-enabled", false, "Enable source NAT in containerized Cloudflare Mesh nodes")
-	flag.StringVar(&opts.meshPodMemoryRequest, "mesh-pod-memory-request", "64Mi", "Memory request for each Cloudflare Mesh Pod")
-	flag.StringVar(&opts.meshPodMemoryLimit, "mesh-pod-memory-limit", "200Mi", "Memory limit for each Cloudflare Mesh Pod")
-	flag.StringVar(&opts.meshPodMemoryRestartAt, "mesh-pod-memory-restart-threshold", "160Mi", "Restart a Cloudflare Mesh Pod when its cgroup memory reaches this threshold")
-	flag.DurationVar(&opts.meshPodMemoryCheckEvery, "mesh-pod-memory-check-period", time.Minute, "Interval between Cloudflare Mesh Pod memory checks")
 	flag.BoolVar(&opts.coreDNSNodeHostsEnabled, "coredns-node-hosts-enabled", false, "Publish Node Mesh IP hostnames to a CoreDNS NodeHosts ConfigMap")
 	flag.StringVar(&opts.coreDNSNamespace, "coredns-namespace", "kube-system", "Namespace containing the CoreDNS NodeHosts ConfigMap")
 	flag.StringVar(&opts.coreDNSConfigMapName, "coredns-configmap-name", "coredns", "CoreDNS NodeHosts ConfigMap name")
@@ -147,10 +126,6 @@ func run(ctx context.Context, opts options) error {
 	if err != nil {
 		return err
 	}
-	pullPolicy := corev1.PullPolicy(opts.meshPodPullPolicy)
-	if pullPolicy != corev1.PullAlways && pullPolicy != corev1.PullIfNotPresent && pullPolicy != corev1.PullNever {
-		return fmt.Errorf("invalid --mesh-pod-image-pull-policy %q", opts.meshPodPullPolicy)
-	}
 	operator, err := meshoperator.New(kube, api, meshoperator.Config{
 		Namespace:               opts.namespace,
 		SecretPrefix:            opts.secretPrefix,
@@ -160,16 +135,6 @@ func run(ctx context.Context, opts options) error {
 		NodeSelector:            opts.nodeSelector,
 		SyncPeriod:              opts.syncPeriod,
 		ConnectorHA:             opts.connectorHA,
-		MeshPodEnabled:          opts.meshPodEnabled,
-		MeshPodImage:            opts.meshPodImage,
-		MeshPodPullPolicy:       pullPolicy,
-		MeshPodNamePrefix:       opts.meshPodNamePrefix,
-		MeshStateHostPath:       opts.meshStateHostPath,
-		MeshSRCNATEnabled:       opts.meshSRCNATEnabled,
-		MeshPodMemoryRequest:    opts.meshPodMemoryRequest,
-		MeshPodMemoryLimit:      opts.meshPodMemoryLimit,
-		MeshPodMemoryRestartAt:  opts.meshPodMemoryRestartAt,
-		MeshPodMemoryCheckEvery: opts.meshPodMemoryCheckEvery,
 		CoreDNSNodeHostsEnabled: opts.coreDNSNodeHostsEnabled,
 		CoreDNSNamespace:        opts.coreDNSNamespace,
 		CoreDNSConfigMapName:    opts.coreDNSConfigMapName,

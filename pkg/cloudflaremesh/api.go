@@ -24,9 +24,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
-const maxAPIResponseSize = 2 << 20
+const (
+	maxAPIResponseSize      = 2 << 20
+	defaultAPIClientTimeout = 30 * time.Second
+)
 
 type ConnectorCredentials struct {
 	ID    string `json:"id"`
@@ -81,7 +85,7 @@ func NewClient(baseURL, accountID, token string, client *http.Client) (*Client, 
 		return nil, errors.New("Cloudflare API base URL must include a host")
 	}
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: defaultAPIClientTimeout}
 	}
 	return &Client{
 		baseURL:   parsed,

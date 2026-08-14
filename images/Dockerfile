@@ -1,13 +1,15 @@
 ARG XX_IMAGE=tonistiigi/xx:1.8.0@sha256:add602d55daca18914838a78221f6bbe4284114b452c86a48f96d59aeb00f5c6
-ARG GO_IMAGE=golang:alpine3.24@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2
+ARG GO_IMAGE=golang:1.26-alpine@sha256:70b46548e42db77e0966aaf3619fd068734dc6c77584d526b91126504fd95816
 ARG RUN_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+ARG WRAPPER_IMAGE=ghcr.io/flannel-io/flannel:v0.28.9@sha256:708a2c9c1cfbfe529d1dbb249cb7113af117f3ed26b5e3e4c8ee015e10555204
 
 FROM --platform=$BUILDPLATFORM ${XX_IMAGE}  AS xx
+FROM --platform=$TARGETPLATFORM ${WRAPPER_IMAGE} AS wrapper
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS base-builder
 # copy xx scripts to your build stage
 COPY --from=xx / /
-RUN apk add bash file make git clang lld patch linux-headers
+RUN apk add bash file make clang lld patch linux-headers
 ARG TARGETPLATFORM
 RUN set -x && \
     xx-apk --no-cache add gcc musl-dev 
@@ -34,14 +36,6 @@ RUN export GOOS=$(xx-info os) &&\
 RUN export GOOS=$(xx-info os) &&\
     export GOARCH=$(xx-info arch) &&\
     CGO_ENABLED=0 go build -o dist/cloudflare-mesh-operator ./cmd/cloudflare-mesh-operator/
-RUN git clone https://github.com/kubernetes-sigs/iptables-wrappers.git /iptables-wrapper
-WORKDIR /iptables-wrapper
-RUN git checkout bfef9e5087a198b50a4124bb9ce9d2c7c99025dd
-RUN export GOOS=$(xx-info os) &&\
-    export GOARCH=$(xx-info arch) &&\
-    export ARCH=$(xx-info arch) &&\
-    make build
-
 FROM ${RUN_IMAGE}
 RUN apk update && apk upgrade
 RUN apk add --no-cache iproute2 ca-certificates nftables iptables strongswan iptables-legacy util-linux && update-ca-certificates
@@ -50,7 +44,7 @@ COPY --from=flannel-builder /build/dist/flanneld /opt/bin/flanneld
 COPY --from=flannel-builder /build/dist/install-conf /opt/bin/install-conf
 COPY --from=flannel-builder /build/dist/cloudflare-mesh-operator /opt/bin/cloudflare-mesh-operator
 COPY dist/mk-docker-opts.sh /opt/bin/
-COPY --from=flannel-builder /iptables-wrapper/bin/iptables-wrapper /usr/sbin
+COPY --from=wrapper /usr/sbin/iptables-wrapper /usr/sbin/iptables-wrapper
 # check manually that iptables-legacy and iptables-nft are present since
 # iptables-wrapper-installer.sh sanity check doesn't work for multi-arch build
 RUN which iptables-legacy && which iptables-nft

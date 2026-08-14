@@ -26,9 +26,6 @@ spec:
                 values:
                 - linux
       hostNetwork: true
-      {{- if and .Values.cloudflareMesh.enabled (not .Values.cloudflareMesh.meshPod.enabled) }}
-      hostPID: true
-      {{- end }}
       priorityClassName: system-node-critical
       {{- with .Values.flannel.tolerations }}
       tolerations:
@@ -53,7 +50,7 @@ spec:
           mountPath: /opt/cni/bin
       {{- if not .Values.flannel.skipCNIConfigInstallation }}
       - name: install-cni
-        image: {{ .Values.flannel.image.repository }}:{{ .Values.flannel.image.tag }}
+        image: {{ .Values.flannel.image.repository }}{{- if .Values.flannel.image.digest }}@{{ .Values.flannel.image.digest }}{{- else }}:{{ .Values.flannel.image.tag }}{{- end }}
         command:
         - /opt/bin/install-conf
         args:
@@ -67,7 +64,7 @@ spec:
       {{- end }}
       containers:
       - name: kube-flannel
-        image: {{ .Values.flannel.image.repository }}:{{ .Values.flannel.image.tag }}
+        image: {{ .Values.flannel.image.repository }}{{- if .Values.flannel.image.digest }}@{{ .Values.flannel.image.digest }}{{- else }}:{{ .Values.flannel.image.tag }}{{- end }}
         command:
         - "/opt/bin/flanneld"
         {{- range .Values.flannel.args }}
@@ -101,7 +98,7 @@ spec:
           {{- end }}
         {{- end }}
         securityContext:
-          {{- if and .Values.cloudflareMesh.enabled (not .Values.cloudflareMesh.meshPod.enabled) }}
+          {{- if .Values.cloudflareMesh.enabled }}
           privileged: true
           {{- else }}
           privileged: false
@@ -137,9 +134,11 @@ spec:
           mountPath: /etc/kube-flannel/
         - name: xtables-lock
           mountPath: /run/xtables.lock
-        {{- if and .Values.cloudflareMesh.enabled (not .Values.cloudflareMesh.meshPod.enabled) }}
+        {{- if .Values.cloudflareMesh.enabled }}
         - name: cloudflare-mesh-state
           mountPath: /var/lib/flannel/cloudflare-mesh
+        - name: dev-net-tun
+          mountPath: /dev/net/tun
         {{- end }}
 {{- if .Values.netpol.enabled }}
       - name: kube-network-policies
@@ -189,11 +188,15 @@ spec:
         hostPath:
           path: /run/xtables.lock
           type: FileOrCreate
-      {{- if and .Values.cloudflareMesh.enabled (not .Values.cloudflareMesh.meshPod.enabled) }}
+      {{- if .Values.cloudflareMesh.enabled }}
       - name: cloudflare-mesh-state
         hostPath:
           path: {{ .Values.cloudflareMesh.stateHostPath }}
           type: DirectoryOrCreate
+      - name: dev-net-tun
+        hostPath:
+          path: /dev/net/tun
+          type: CharDevice
       {{- end }}
       {{- if .Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 6 }}

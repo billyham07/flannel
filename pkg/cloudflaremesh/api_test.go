@@ -53,6 +53,16 @@ func TestEnsureConnectorCreatesMissingNode(t *testing.T) {
 	}
 }
 
+func TestNewClientUsesBoundedDefaultHTTPClient(t *testing.T) {
+	client, err := NewClient("https://api.cloudflare.com/client/v4", "account", "secret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.http.Timeout != defaultAPIClientTimeout {
+		t.Fatalf("default HTTP timeout = %s, want %s", client.http.Timeout, defaultAPIClientTimeout)
+	}
+}
+
 func TestEnsureConnectorReusesNodeAndGetsToken(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/accounts/account/warp_connector", func(w http.ResponseWriter, _ *http.Request) {

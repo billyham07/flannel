@@ -27,8 +27,6 @@ const (
 	SecretConnectorTokenKey = "connector-token"
 	ManagedByLabel          = "app.kubernetes.io/managed-by"
 	ManagedByOperator       = "cloudflare-mesh-operator"
-	MeshPodComponentLabel   = "app.kubernetes.io/component"
-	MeshPodComponent        = "cloudflare-mesh-node"
 	ConnectorIDAnnotation   = "cloudflare-mesh.flannel.io/connector-id"
 )
 
@@ -39,15 +37,6 @@ type LeaseData struct {
 
 func NodeSecretName(prefix, nodeName string) string {
 	return boundedName(prefix+nodeName, 253)
-}
-
-func NodePodName(prefix, nodeName string) string {
-	return boundedName(prefix+nodeName, 253)
-}
-
-func ConnectorStateDirectory(connectorID string) string {
-	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(connectorID)))[:20]
-	return "connector-" + digest
 }
 
 func ConnectorName(prefix, clusterName, nodeName string) string {
