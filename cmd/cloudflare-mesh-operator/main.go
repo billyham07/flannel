@@ -49,6 +49,7 @@ type options struct {
 	nodeSelector            string
 	syncPeriod              time.Duration
 	registrationGC          string
+	registrationGCPeriod    time.Duration
 	connectorHA             bool
 	coreDNSNodeHostsEnabled bool
 	coreDNSNamespace        string
@@ -90,6 +91,8 @@ func parseFlags() *options {
 	flag.DurationVar(&opts.syncPeriod, "sync-period", 15*time.Second, "Full reconciliation period")
 	flag.StringVar(&opts.registrationGC, "registration-gc", meshoperator.RegistrationGCDryRun,
 		"Reclaim WARP registrations orphaned by re-enrolled nodes: dryrun (log only), on, or off")
+	flag.DurationVar(&opts.registrationGCPeriod, "registration-gc-period", 10*time.Minute,
+		"How often to sweep for orphaned WARP registrations, independently of -sync-period")
 	flag.BoolVar(&opts.connectorHA, "connector-ha", false, "Create Cloudflare Mesh nodes with HA enabled")
 	flag.BoolVar(&opts.coreDNSNodeHostsEnabled, "coredns-node-hosts-enabled", false, "Publish Node Mesh IP hostnames to a CoreDNS NodeHosts ConfigMap")
 	flag.StringVar(&opts.coreDNSNamespace, "coredns-namespace", "kube-system", "Namespace containing the CoreDNS NodeHosts ConfigMap")
@@ -138,6 +141,7 @@ func run(ctx context.Context, opts options) error {
 		NodeSelector:            opts.nodeSelector,
 		SyncPeriod:              opts.syncPeriod,
 		RegistrationGC:          opts.registrationGC,
+		RegistrationGCPeriod:    opts.registrationGCPeriod,
 		ConnectorHA:             opts.connectorHA,
 		CoreDNSNodeHostsEnabled: opts.coreDNSNodeHostsEnabled,
 		CoreDNSNamespace:        opts.coreDNSNamespace,

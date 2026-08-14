@@ -48,6 +48,13 @@ const (
 // perfectly healthy registration has not yet published its Mesh IP on the node.
 const registrationGCGrace = 30 * time.Minute
 
+// defaultRegistrationGCPeriod paces the sweep independently of SyncPeriod.
+// Listing every registration on the account is far more expensive than the
+// connector and route calls -- it is account-wide and paginated -- while an
+// orphan costs nothing to leave in place for a few minutes, so there is no
+// reason to pay for it on every reconcile.
+const defaultRegistrationGCPeriod = 10 * time.Minute
+
 type Config struct {
 	Namespace               string
 	SecretPrefix            string
@@ -57,6 +64,7 @@ type Config struct {
 	NodeSelector            string
 	SyncPeriod              time.Duration
 	RegistrationGC          string
+	RegistrationGCPeriod    time.Duration
 	ConnectorHA             bool
 	CoreDNSNodeHostsEnabled bool
 	CoreDNSNamespace        string
@@ -68,10 +76,14 @@ type Config struct {
 }
 
 type Operator struct {
-	kube  kubernetes.Interface
-	api   meshapi.API
-	cfg   Config
-	clock func() time.Time
+	kube kubernetes.Interface
+	api  meshapi.API
+	cfg  Config
+	// nextRegistrationGC paces the sweep. Zero means "run on the next
+	// reconcile", so a freshly elected leader sweeps once before settling into
+	// the interval.
+	nextRegistrationGC time.Time
+	clock              func() time.Time
 }
 
 func New(kube kubernetes.Interface, api meshapi.API, cfg Config) (*Operator, error) {
@@ -89,6 +101,9 @@ func New(kube kubernetes.Interface, api meshapi.API, cfg Config) (*Operator, err
 	}
 	if cfg.RegistrationGC == "" {
 		cfg.RegistrationGC = RegistrationGCDryRun
+	}
+	if cfg.RegistrationGCPeriod <= 0 {
+		cfg.RegistrationGCPeriod = defaultRegistrationGCPeriod
 	}
 	switch cfg.RegistrationGC {
 	case RegistrationGCDryRun, RegistrationGCOn, RegistrationGCOff:
@@ -261,12 +276,21 @@ func (o *Operator) collectRegistrations(ctx context.Context, desiredMeshIPs map[
 	if o.cfg.RegistrationGC == RegistrationGCOff {
 		return nil
 	}
+	now := o.now()
+	if now.Before(o.nextRegistrationGC) {
+		return nil
+	}
+	// Scheduled before the work, not after, so a failing sweep -- a missing
+	// token scope being the likely one -- backs off instead of retrying and
+	// logging on every reconcile.
+	o.nextRegistrationGC = now.Add(o.cfg.RegistrationGCPeriod)
+
 	registrations, err := o.api.ListDeviceRegistrations(ctx)
 	if err != nil {
 		return fmt.Errorf("list device registrations for garbage collection: %w", err)
 	}
 	prefix := meshapi.ConnectorNamePrefix(o.cfg.ConnectorPrefix, o.cfg.ClusterName)
-	cutoff := o.now().Add(-registrationGCGrace)
+	cutoff := now.Add(-registrationGCGrace)
 	var errs []error
 	for i := range registrations {
 		registration := &registrations[i]

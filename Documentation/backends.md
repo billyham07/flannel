@@ -114,7 +114,10 @@ ignores any registration created within the last 30 minutes so that a node
 which has enrolled but not yet published its Mesh IP is never collected. The
 default is `dryrun`, which logs what it would delete without deleting
 anything; set it to `on` once the log looks right, or `off` to disable the
-feature and its API calls entirely.
+feature and its API calls entirely. The sweep is paced by
+`-registration-gc-period` (10 minutes by default) rather than `-sync-period`,
+because listing registrations is an account-wide paginated call while an
+orphan costs nothing to leave in place for a few minutes.
 
 This backend is currently IPv4-only.
 
