@@ -184,6 +184,61 @@ func TestRegistrationGCOffSkipsTheListCall(t *testing.T) {
 	}
 }
 
+// Listing every registration on the account is account-wide and paginated, so
+// it must not ride the 15s reconcile period.
+func TestRegistrationGCRunsOnItsOwnInterval(t *testing.T) {
+	now := time.Now()
+	kube, api := registrationGCFixture(t, now)
+	op := newRegistrationGCOperator(t, kube, api, RegistrationGCOn, now)
+	op.cfg.RegistrationGCPeriod = 10 * time.Minute
+
+	// A freshly elected leader sweeps once, then goes quiet.
+	for range 5 {
+		if err := op.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if api.listedRegistrations != 1 {
+		t.Fatalf("listed registrations %d times across 5 reconciles, want 1", api.listedRegistrations)
+	}
+
+	// Still inside the interval.
+	op.clock = func() time.Time { return now.Add(9 * time.Minute) }
+	if err := op.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if api.listedRegistrations != 1 {
+		t.Fatalf("swept early: listed %d times", api.listedRegistrations)
+	}
+
+	// Past it.
+	op.clock = func() time.Time { return now.Add(11 * time.Minute) }
+	if err := op.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if api.listedRegistrations != 2 {
+		t.Fatalf("did not sweep after the interval elapsed: listed %d times", api.listedRegistrations)
+	}
+}
+
+// A sweep that fails must back off too, or a missing token scope logs on every
+// reconcile forever.
+func TestFailingRegistrationGCBacksOff(t *testing.T) {
+	now := time.Now()
+	kube, api := registrationGCFixture(t, now)
+	api.listErr = errors.New("Cloudflare API HTTP 403: 10000: Authentication error")
+	op := newRegistrationGCOperator(t, kube, api, RegistrationGCOn, now)
+
+	for range 4 {
+		if err := op.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if api.listedRegistrations != 1 {
+		t.Fatalf("a failing sweep retried %d times, want 1", api.listedRegistrations)
+	}
+}
+
 // The Zero Trust scope is the only permission this loop needs beyond the
 // connector ones, so a token that lacks it must degrade to "no GC" rather than
 // wedge every reconcile.
