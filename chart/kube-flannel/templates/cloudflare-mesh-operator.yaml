@@ -41,6 +41,8 @@ spec:
         - --connector-prefix={{ .Values.cloudflareMesh.connectorPrefix }}
         - --secret-prefix={{ .Values.cloudflareMesh.secretPrefix }}
         - --sync-period={{ .Values.cloudflareMesh.operator.syncPeriod }}
+        - --registration-gc={{ .Values.cloudflareMesh.operator.registrationGC }}
+        - --registration-gc-period={{ .Values.cloudflareMesh.operator.registrationGCPeriod }}
         - --connector-ha={{ .Values.cloudflareMesh.connectorHA }}
         - --coredns-node-hosts-enabled={{ .Values.cloudflareMesh.coreDNSNodeHosts.enabled }}
         - --coredns-namespace={{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}

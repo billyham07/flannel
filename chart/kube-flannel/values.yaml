@@ -136,6 +136,15 @@ cloudflareMesh:
   operator:
     replicas: 2
     syncPeriod: "15s"
+    # Reclaim WARP device registrations orphaned by re-enrolled nodes.
+    # "dryrun" logs what it would delete without deleting it, "on" deletes,
+    # "off" skips the API calls entirely. "on" and "dryrun" need the Zero Trust
+    # scope on the API token.
+    registrationGC: "dryrun"
+    # Paced separately from syncPeriod: listing registrations is an
+    # account-wide paginated call, while an orphan costs nothing to leave in
+    # place for a few minutes.
+    registrationGCPeriod: "10m"
     nodeSelector: ""
     extraEnv: []
     image:

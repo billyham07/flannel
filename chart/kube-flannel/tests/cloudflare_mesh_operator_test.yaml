@@ -1,0 +1,40 @@
+suite: test cloudflare mesh operator
+templates:
+  - cloudflare-mesh-operator.yaml
+set:
+  flannel.backend: cloudflare-mesh
+  cloudflareMesh.enabled: true
+  cloudflareMesh.accountID: 0123456789abcdef0123456789abcdef
+tests:
+  - it: should default registration GC to dry run
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registration-gc=dryrun
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registration-gc-period=10m
+
+  - it: should pace registration GC separately from the sync period
+    set:
+      cloudflareMesh.operator.syncPeriod: 5s
+      cloudflareMesh.operator.registrationGC: "on"
+      cloudflareMesh.operator.registrationGCPeriod: 30m
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --sync-period=5s
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registration-gc=on
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registration-gc-period=30m
+
+  - it: should allow disabling registration GC entirely
+    set:
+      cloudflareMesh.operator.registrationGC: "off"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registration-gc=off
