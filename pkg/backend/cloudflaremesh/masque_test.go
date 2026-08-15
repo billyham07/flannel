@@ -38,7 +38,7 @@ import (
 )
 
 func TestConnectorAccountID(t *testing.T) {
-	want := "57f79fc9b5dbb4ef54cec951504333b3"
+	want := "0123456789abcdef0123456789abcdef"
 	raw, err := hex.DecodeString(want)
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +145,7 @@ func TestDeletedRegistrationTriggersReenrollment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	account, err := json.Marshal(map[string]string{"a": "57f79fc9b5dbb4ef54cec951504333b3"})
+	account, err := json.Marshal(map[string]string{"a": "0123456789abcdef0123456789abcdef"})
 	if err != nil {
 		t.Fatal(err)
 	}

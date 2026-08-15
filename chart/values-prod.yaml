@@ -13,7 +13,9 @@ flannel:
 
 cloudflareMesh:
   enabled: true
-  accountID: "57f79fc9b5dbb4ef54cec951504333b3"
+  # accountID is intentionally absent: supply it with a second -f
+  # override file (see values-account.yaml.example) so the account
+  # identifier is not tracked in git.
   clusterName: "production"
   connectorPrefix: "flannel-"
   secretPrefix: "cloudflare-mesh-node-"
