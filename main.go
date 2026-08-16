@@ -49,6 +49,7 @@ import (
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/flannel-io/flannel/pkg/backend"
 	_ "github.com/flannel-io/flannel/pkg/backend/alloc"
+	_ "github.com/flannel-io/flannel/pkg/backend/cloudflaremesh"
 	_ "github.com/flannel-io/flannel/pkg/backend/extension"
 	_ "github.com/flannel-io/flannel/pkg/backend/hostgw"
 	_ "github.com/flannel-io/flannel/pkg/backend/ipip"

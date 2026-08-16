@@ -33,6 +33,19 @@ tests:
           path: spec.template.spec.initContainers[0].image
           value: cicker.io/flannel/flannel-cni-plugin:v777.66.5
 
+  - it: should pin the flannel image by digest when configured
+    set:
+      flannel.image.repository: cicker.io/flannel/flannel
+      flannel.image.tag: ignored
+      flannel.image.digest: sha256:0123456789abcdef
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: cicker.io/flannel/flannel@sha256:0123456789abcdef
+      - equal:
+          path: spec.template.spec.initContainers[1].image
+          value: cicker.io/flannel/flannel@sha256:0123456789abcdef
+
   - it: should have the correct args
     set:
       flannel.args:
@@ -119,3 +132,27 @@ tests:
       - equal:
           path: spec.template.spec.nodeSelector["eks.amazonaws.com/compute-type"]
           value: hybrid
+
+  - it: should mount native Mesh state and TUN without host PID
+    set:
+      flannel.backend: cloudflare-mesh
+      cloudflareMesh.enabled: true
+      cloudflareMesh.accountID: 0123456789abcdef0123456789abcdef
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.privileged
+          value: true
+      - notExists:
+          path: spec.template.spec.hostPID
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: dev-net-tun
+            mountPath: /dev/net/tun
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: dev-net-tun
+            hostPath:
+              path: /dev/net/tun
+              type: CharDevice

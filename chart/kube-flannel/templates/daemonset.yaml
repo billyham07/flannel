@@ -50,7 +50,7 @@ spec:
           mountPath: /opt/cni/bin
       {{- if not .Values.flannel.skipCNIConfigInstallation }}
       - name: install-cni
-        image: {{ .Values.flannel.image.repository }}:{{ .Values.flannel.image.tag }}
+        image: {{ .Values.flannel.image.repository }}{{- if .Values.flannel.image.digest }}@{{ .Values.flannel.image.digest }}{{- else }}:{{ .Values.flannel.image.tag }}{{- end }}
         command:
         - /opt/bin/install-conf
         args:
@@ -64,7 +64,7 @@ spec:
       {{- end }}
       containers:
       - name: kube-flannel
-        image: {{ .Values.flannel.image.repository }}:{{ .Values.flannel.image.tag }}
+        image: {{ .Values.flannel.image.repository }}{{- if .Values.flannel.image.digest }}@{{ .Values.flannel.image.digest }}{{- else }}:{{ .Values.flannel.image.tag }}{{- end }}
         command:
         - "/opt/bin/flanneld"
         {{- range .Values.flannel.args }}
@@ -98,9 +98,15 @@ spec:
           {{- end }}
         {{- end }}
         securityContext:
+          {{- if .Values.cloudflareMesh.enabled }}
+          privileged: true
+          {{- else }}
           privileged: false
           capabilities:
-            add: ["NET_ADMIN", "NET_RAW"]
+            add:
+            - NET_ADMIN
+            - NET_RAW
+          {{- end }}
         env:
         - name: POD_NAME
           valueFrom:
@@ -110,10 +116,33 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         - name: EVENT_QUEUE_DEPTH
           value: "5000"
         - name: CONT_WHEN_CACHE_NOT_READY
           value: "false"
+        {{- if .Values.cloudflareMesh.enabled }}
+        {{- with .Values.cloudflareMesh.compat }}
+        {{- with .clientVersion }}
+        - name: CLOUDFLARE_MESH_CLIENT_VERSION
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .deviceVersion }}
+        - name: CLOUDFLARE_MESH_DEVICE_VERSION
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .registrationAPI }}
+        - name: CLOUDFLARE_MESH_REGISTRATION_API
+          value: {{ . | quote }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- with .Values.flannel.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         volumeMounts:
         - name: run
           mountPath: /run/flannel
@@ -121,6 +150,12 @@ spec:
           mountPath: /etc/kube-flannel/
         - name: xtables-lock
           mountPath: /run/xtables.lock
+        {{- if .Values.cloudflareMesh.enabled }}
+        - name: cloudflare-mesh-state
+          mountPath: /var/lib/flannel/cloudflare-mesh
+        - name: dev-net-tun
+          mountPath: /dev/net/tun
+        {{- end }}
 {{- if .Values.netpol.enabled }}
       - name: kube-network-policies
         image: {{ .Values.netpol.image.repository }}:{{ .Values.netpol.image.tag }}
@@ -169,6 +204,16 @@ spec:
         hostPath:
           path: /run/xtables.lock
           type: FileOrCreate
+      {{- if .Values.cloudflareMesh.enabled }}
+      - name: cloudflare-mesh-state
+        hostPath:
+          path: {{ .Values.cloudflareMesh.stateHostPath }}
+          type: DirectoryOrCreate
+      - name: dev-net-tun
+        hostPath:
+          path: /dev/net/tun
+          type: CharDevice
+      {{- end }}
       {{- if .Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 6 }}
       {{- end }}

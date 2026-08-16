@@ -1,0 +1,44 @@
+---
+# Reproduces the hand-applied deployment on the 5-node production cluster.
+# Kept in-tree so a reinstall does not lose the configuration that only ever
+# existed as kubectl patches.
+podCidr: "10.10.128.0/18"
+
+flannel:
+  backend: "cloudflare-mesh"
+  image:
+    repository: docker.io/sgabpw/flannel-cloudflare-mesh
+    tag: mesh-gcpace-20260815
+    digest: ""
+
+cloudflareMesh:
+  enabled: true
+  # accountID is intentionally absent: supply it with a second -f
+  # override file (see values-account.yaml.example) so the account
+  # identifier is not tracked in git.
+  clusterName: "production"
+  connectorPrefix: "flannel-"
+  secretPrefix: "cloudflare-mesh-node-"
+  connectorHA: false
+  meshCIDR: "100.96.0.0/12"
+  routeTable: 51820
+  mtu: 1280
+  keepalivePeriod: "30s"
+  connectTimeout: "3m"
+  stateHostPath: "/var/lib/flannel/cloudflare-mesh"
+  apiTokenSecret:
+    name: "cloudflare-mesh-api-token"
+    key: "api-token"
+  operator:
+    replicas: 2
+    syncPeriod: "15s"
+    registrationGC: "on"
+    registrationGCPeriod: "10m"
+  coreDNSNodeHosts:
+    enabled: true
+    namespace: "kube-system"
+    configMapName: "coredns"
+    dataKey: "NodeHosts"
+    hostnameSuffix: "-mesh"
+    rolloutKind: "daemonset"
+    rolloutName: "coredns"

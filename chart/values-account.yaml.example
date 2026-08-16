@@ -1,0 +1,17 @@
+---
+# Copy to values-account.yaml (git-ignored) and fill in the real account.
+#
+# The Cloudflare account identifier is deliberately kept out of the tracked
+# per-cluster values so it is not published with the repository. It is not a
+# credential -- the API token lives in a Secret the chart only references --
+# but it identifies the account, so it is supplied at install time instead:
+#
+#   helm upgrade --install kube-flannel chart/kube-flannel \
+#     -n kube-flannel \
+#     -f chart/values-prod.yaml \
+#     -f chart/values-account.yaml
+#
+# Omitting this file makes the install fail with "cloudflareMesh.accountID is
+# required" rather than deploying something half-configured.
+cloudflareMesh:
+  accountID: "0123456789abcdef0123456789abcdef"
