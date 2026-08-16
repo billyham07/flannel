@@ -76,7 +76,6 @@ data:
         "Type": {{ .Values.flannel.backend | quote }}
 {{- else if eq .Values.flannel.backend "cloudflare-mesh" }}
         "Type": "cloudflare-mesh",
-        "ControlPlaneMode": "operator",
         "OperatorNamespace": {{ .Release.Namespace | quote }},
         "OperatorSecretPrefix": {{ .Values.cloudflareMesh.secretPrefix | quote }},
         "InterfaceName": "flannel.mesh",

@@ -24,9 +24,6 @@ import (
 )
 
 const (
-	defaultAPIBaseURL      = "https://api.cloudflare.com/client/v4"
-	defaultControlPlane    = "operator"
-	defaultTokenFile       = "/var/run/secrets/cloudflare-mesh/api-token"
 	defaultOperatorNS      = "kube-flannel"
 	defaultSecretPrefix    = "cloudflare-mesh-node-"
 	defaultStateFile       = "/var/lib/flannel/cloudflare-mesh/state.json"
@@ -38,19 +35,15 @@ const (
 	defaultConnectTimeout  = 45 * time.Second
 	defaultBootstrapWait   = 2 * time.Minute
 	defaultReconcilePeriod = 30 * time.Second
-	cloudflareAPITokenEnv  = "CLOUDFLARE_API_TOKEN"
-	cloudflareAccountIDEnv = "CLOUDFLARE_ACCOUNT_ID"
 	cloudflareNodeNameEnv  = "NODE_NAME"
 )
 
+// config is the backend stanza of net-conf.json. The Cloudflare account
+// credentials deliberately do not appear here: every node gets its connector
+// from the operator's per-node bootstrap Secret, so the account API token stays
+// confined to the operator.
 type config struct {
-	ControlPlaneMode     string `json:"ControlPlaneMode"`
-	AccountID            string `json:"AccountID"`
-	APITokenFile         string `json:"APITokenFile"`
-	APIBaseURL           string `json:"APIBaseURL"`
 	NodeName             string `json:"NodeName"`
-	ConnectorID          string `json:"ConnectorID"`
-	ConnectorHA          bool   `json:"ConnectorHA"`
 	OperatorNamespace    string `json:"OperatorNamespace"`
 	OperatorSecretPrefix string `json:"OperatorSecretPrefix"`
 	Kubeconfig           string `json:"Kubeconfig"`
@@ -67,7 +60,6 @@ type config struct {
 
 type runtimeConfig struct {
 	config
-	APIToken       string
 	ConnectWait    time.Duration
 	BootstrapWait  time.Duration
 	ReconcileEvery time.Duration
@@ -76,9 +68,6 @@ type runtimeConfig struct {
 
 func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 	cfg := config{
-		ControlPlaneMode:     defaultControlPlane,
-		APITokenFile:         defaultTokenFile,
-		APIBaseURL:           defaultAPIBaseURL,
 		OperatorNamespace:    defaultOperatorNS,
 		OperatorSecretPrefix: defaultSecretPrefix,
 		StateFile:            defaultStateFile,
@@ -93,9 +82,6 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 		}
 	}
 
-	if cfg.ControlPlaneMode != "operator" && cfg.ControlPlaneMode != "direct" {
-		return nil, fmt.Errorf("ControlPlaneMode must be operator or direct, got %q", cfg.ControlPlaneMode)
-	}
 	if cfg.InterfaceName == "" || len(cfg.InterfaceName) > 15 {
 		return nil, fmt.Errorf("InterfaceName must be 1-15 bytes")
 	}
@@ -120,27 +106,6 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 		return nil, errors.New("cloudflare Mesh node name must not be empty")
 	}
 
-	token := ""
-	if cfg.ControlPlaneMode == "direct" {
-		if cfg.AccountID == "" {
-			cfg.AccountID = os.Getenv(cloudflareAccountIDEnv)
-		}
-		if cfg.AccountID == "" {
-			return nil, fmt.Errorf("cloudflare account ID must be set with AccountID or %s", cloudflareAccountIDEnv)
-		}
-		token = strings.TrimSpace(os.Getenv(cloudflareAPITokenEnv))
-		if token == "" {
-			contents, err := os.ReadFile(cfg.APITokenFile)
-			if err != nil {
-				return nil, fmt.Errorf("read Cloudflare API token file %q: %w", cfg.APITokenFile, err)
-			}
-			token = strings.TrimSpace(string(contents))
-		}
-		if token == "" {
-			return nil, errors.New("Cloudflare API token must not be empty")
-		}
-	}
-
 	connectWait, err := parseDuration(cfg.ConnectTimeout, defaultConnectTimeout, "ConnectTimeout")
 	if err != nil {
 		return nil, err
@@ -161,7 +126,6 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 
 	return &runtimeConfig{
 		config:         cfg,
-		APIToken:       token,
 		ConnectWait:    connectWait,
 		BootstrapWait:  bootstrapWait,
 		ReconcileEvery: reconcileEvery,

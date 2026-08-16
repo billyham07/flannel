@@ -50,19 +50,8 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 	if err != nil {
 		return nil, err
 	}
-	if err := removeLegacyWARPFirewall(ctx); err != nil {
-		return nil, err
-	}
-	var connector *meshapi.ConnectorCredentials
-	var api meshapi.API
-	if cfg.ControlPlaneMode == "operator" {
-		connector, err = waitForOperatorCredentials(ctx, cfg)
-	} else {
-		api, err = meshapi.NewClient(cfg.APIBaseURL, cfg.AccountID, cfg.APIToken, nil)
-		if err == nil {
-			connector, err = api.EnsureConnector(ctx, cfg.ConnectorID, cfg.NodeName, cfg.ConnectorHA)
-		}
-	}
+	logCompatOverrides()
+	connector, err := waitForOperatorCredentials(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -93,16 +82,6 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 	if err != nil {
 		transport.Close()
 		return nil, err
-	}
-	if api != nil {
-		comment := fmt.Sprintf("flannel:%s:%s", cfg.NodeName, localLease.Subnet)
-		if _, err := api.EnsureRoute(ctx, connector.ID, localLease.Subnet.String(), comment); err != nil {
-			if cleanupErr := routes.Cleanup(); cleanupErr != nil {
-				log.Errorf("cloudflare-mesh: clean up routing state: %v", cleanupErr)
-			}
-			transport.Close()
-			return nil, err
-		}
 	}
 
 	log.Infof("cloudflare-mesh: node=%s connector=%s meshIP=%s podCIDR=%s routeTable=%d mtu=%d",
