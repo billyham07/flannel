@@ -14,3 +14,5 @@ dist/qemu-*
 vendor/*
 e2e/scratch/*
 e2e/kube-flannel.yml
+.cache/
+chart/values-account.yaml

@@ -1,0 +1,98 @@
+// Copyright 2026 flannel authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !windows
+
+package cloudflaremesh
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
+
+	"github.com/flannel-io/flannel/pkg/backend"
+	meshapi "github.com/flannel-io/flannel/pkg/cloudflaremesh"
+	"github.com/flannel-io/flannel/pkg/ip"
+	"github.com/flannel-io/flannel/pkg/lease"
+	"github.com/flannel-io/flannel/pkg/subnet"
+	log "k8s.io/klog/v2"
+)
+
+type meshBackend struct {
+	sm subnet.Manager
+}
+
+func init() {
+	backend.Register(meshapi.BackendName, New)
+}
+
+func New(sm subnet.Manager, _ *backend.ExternalInterface) (backend.Backend, error) {
+	return &meshBackend{sm: sm}, nil
+}
+
+func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, networkConfig *subnet.Config) (backend.Network, error) {
+	if networkConfig.EnableIPv6 {
+		return nil, fmt.Errorf("%s backend does not support IPv6 yet", meshapi.BackendName)
+	}
+	cfg, err := loadConfig(networkConfig.Backend)
+	if err != nil {
+		return nil, err
+	}
+	logCompatOverrides()
+	startPprofIfRequested()
+	connector, err := waitForOperatorCredentials(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	transport, err := startNativeTransport(ctx, cfg, connector)
+	if err != nil {
+		return nil, err
+	}
+
+	// Everything past this point owns a live TUN device and reconnect
+	// supervisor, so no error may return without tearing them down.
+	meshIP := transport.meshIP()
+	backendData, err := json.Marshal(meshapi.LeaseData{ConnectorID: connector.ID, MeshIP: meshIP.String()})
+	if err != nil {
+		transport.Close()
+		return nil, fmt.Errorf("encode cloudflare-mesh lease data: %w", err)
+	}
+	attrs := lease.LeaseAttrs{
+		PublicIP:    ip.FromIP(meshIP),
+		BackendType: meshapi.BackendName,
+		BackendData: backendData,
+	}
+	localLease, err := b.sm.AcquireLease(ctx, &attrs)
+	if err != nil {
+		transport.Close()
+		return nil, fmt.Errorf("acquire cloudflare-mesh subnet lease: %w", err)
+	}
+	routes, err := newLocalRouteManager(cfg, meshIP, networkConfig.Network.String(), localLease.Subnet.String())
+	if err != nil {
+		transport.Close()
+		return nil, err
+	}
+
+	log.Infof("cloudflare-mesh: node=%s connector=%s meshIP=%s podCIDR=%s routeTable=%d mtu=%d",
+		cfg.NodeName, connector.ID, routes.MeshIP(), localLease.Subnet, routes.Table(), routes.MTU())
+	return &meshNetwork{
+		lease:          localLease,
+		sm:             b.sm,
+		routes:         routes,
+		transport:      transport,
+		reconcileEvery: cfg.ReconcileEvery,
+		desired:        make(map[string]struct{}),
+	}, nil
+}

@@ -86,6 +86,152 @@ Alloc performs subnet allocation with no forwarding of data packets.
 Type:
 * `Type` (string): `alloc`
 
+### Cloudflare Mesh
+
+Cloudflare Mesh embeds the encrypted transport directly in `flanneld`. It
+enrolls the node connector, creates the `flannel.mesh` TUN device, establishes
+a QUIC/HTTP3 MASQUE CONNECT-IP session, reconnects it, and reconciles remote
+PodCIDR routes in a dedicated Linux policy-routing table. It does not install
+or execute `warp-svc`, `warp-cli`, or a separate Cloudflare Mesh Pod.
+
+Traffic originating from the node or a `hostNetwork` Pod and destined for a
+remote PodCIDR is SNATed to the local PodCIDR gateway address. Cloudflare routes
+the reply to that PodCIDR; the connector's Mesh address is transport-only and
+is not used as a return-route identity.
+
+The `cloudflare-mesh-operator` is control-plane only. It creates one Cloudflare
+connector and one bootstrap Secret per Kubernetes Node, publishes the Node's
+ready Flannel PodCIDR through the Cloudflare route API, and removes resources
+owned by deleted Nodes. `flanneld` reads only its own connector token.
+
+Each node also holds a Cloudflare WARP *device registration*, which owns its
+Mesh virtual IP. `flanneld` deletes its own registration before enrolling a
+replacement, so a changed connector does not leak one. That is not possible
+when the state file itself was lost, because nothing on the node remembers the
+old registration; `-registration-gc` on the operator reclaims those. It only
+ever considers registrations named with this cluster's connector prefix, and
+ignores any registration created within the last 30 minutes so that a node
+which has enrolled but not yet published its Mesh IP is never collected. The
+default is `dryrun`, which logs what it would delete without deleting
+anything; set it to `on` once the log looks right, or `off` to disable the
+feature and its API calls entirely. The sweep is paced by
+`-registration-gc-period` (10 minutes by default) rather than `-sync-period`,
+because listing registrations is an account-wide paginated call while an
+orphan costs nothing to leave in place for a few minutes.
+
+This backend is currently IPv4-only.
+
+Requirements:
+
+* Nodes must provide `/dev/net/tun`. The chart runs `flanneld` privileged when
+  this backend is enabled so it can create the TUN device and policy routes.
+  No host Cloudflare One Client package is required.
+* Configure the Cloudflare account for Mesh connectivity and create an API
+  token with `Cloudflare One Networks Write` and `Cloudflare One Connectors
+  Write` (or `Cloudflare One Connector: WARP Write`) permissions. Running the
+  operator with `-registration-gc` set to `dryrun` or `on` additionally
+  requires a device-registration read/write permission on the same token.
+* Install the standard CNI plugins, including `bridge`, `host-local`,
+  `loopback`, and `portmap`, in `flannel.cniBinDir` on every node. The Flannel
+  CNI image installs only the `flannel` binary.
+* When using K3s, disable its embedded Flannel and deploy this Flannel build
+  with the Helm chart.
+
+Backend configuration:
+
+```json
+{
+  "Network": "10.244.0.0/16",
+  "Backend": {
+    "Type": "cloudflare-mesh",
+    "OperatorNamespace": "kube-flannel",
+    "OperatorSecretPrefix": "cloudflare-mesh-node-",
+    "StateFile": "/var/lib/flannel/cloudflare-mesh/state.json",
+    "InterfaceName": "flannel.mesh",
+    "MeshCIDR": "100.96.0.0/12",
+    "RouteTable": 51820,
+    "MTU": 1280,
+    "ConnectTimeout": "3m",
+    "KeepalivePeriod": "30s"
+  }
+}
+```
+
+Every node gets its connector from the operator's per-node bootstrap Secret, so
+the backend stanza never carries Cloudflare account credentials; the account API
+token stays confined to the operator.
+
+Cloudflare only enrols clients whose build it recognises, so the backend
+presents the fingerprint of a known-good WARP for Linux release. If Cloudflare
+retires that build, enrollment starts failing with a 4xx and the error names the
+three values involved. Each can be overridden through the environment, which
+unblocks a cluster without waiting for a new image:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CLOUDFLARE_MESH_CLIENT_VERSION` | `l-2026.7.974.2` | `CF-Client-Version` request header |
+| `CLOUDFLARE_MESH_DEVICE_VERSION` | `2026.7.974.2` | version reported in device-state updates |
+| `CLOUDFLARE_MESH_REGISTRATION_API` | `v0a974` | registration API path segment |
+
+The Helm chart exposes these as `cloudflareMesh.compat.clientVersion`,
+`cloudflareMesh.compat.deviceVersion` and
+`cloudflareMesh.compat.registrationAPI`. Leave them empty unless Cloudflare is
+actively rejecting enrollment; a node running with an override says so in its
+log.
+
+The state file contains the node's P-256 private key and Cloudflare registration
+response. It is written atomically with mode `0600` to the per-node host path.
+When the operator replaces a connector, `flanneld` replaces that registration
+automatically. `ConnectTimeout` covers initial connector enrollment and the
+first successful MASQUE session; startup fails if the tunnel is not usable.
+
+Helm example:
+
+```yaml
+flannel:
+  backend: cloudflare-mesh
+cloudflareMesh:
+  enabled: true
+  accountID: 0123456789abcdef0123456789abcdef
+  clusterName: production
+  meshCIDR: 100.96.0.0/12
+  routeTable: 51820
+  mtu: 1280
+  keepalivePeriod: 30s
+  connectTimeout: 3m
+  stateHostPath: /var/lib/flannel/cloudflare-mesh
+  coreDNSNodeHosts:
+    enabled: true
+    namespace: kube-system
+    configMapName: coredns
+    dataKey: NodeHosts
+    hostnameSuffix: -mesh
+    rolloutKind: deployment
+    rolloutName: coredns
+  apiTokenSecret:
+    name: cloudflare-mesh-api-token
+    key: api-token
+```
+
+The API token Secret must exist in the release namespace before installing the
+chart. Bootstrap Secrets contain connector enrollment tokens and should be
+encrypted at rest. Only the operator holds the account API token.
+
+When `coreDNSNodeHosts.enabled` is true, the operator maintains a marked block
+in the configured CoreDNS hosts file. Each ready Flannel lease contributes its
+Mesh IP under `<node-name><hostnameSuffix>`. Existing entries outside the
+marked block are preserved, and stale Mesh entries are removed automatically.
+Because ConfigMaps mounted with `subPath` do not receive live updates, the
+operator also updates a content-hash annotation on the configured CoreDNS
+Deployment or DaemonSet so that each hosts-file change triggers one rollout.
+
+The Helm chart runs the operator with host networking so it can bootstrap a
+node before CNI is ready. The DaemonSet mounts `/dev/net/tun` and the state host
+path directly into `flanneld`; there is no transport sidecar or per-node
+transport Pod. On upgrade from the legacy implementation, delete Pods labeled
+`app.kubernetes.io/component=cloudflare-mesh-node` after deploying the native
+image because those Node-owned Pods are not Helm resources.
+
 ### TencentCloud VPC
 
 Use TencentCloud VPC to create IP routes in a [TencentCloud VPC route table](https://intl.cloud.tencent.com/product/vpc) when running in an TencentCloud VPC. This mitigates the need to create a separate flannel interface.

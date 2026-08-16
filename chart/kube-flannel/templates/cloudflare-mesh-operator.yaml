@@ -1,0 +1,74 @@
+{{- if .Values.cloudflareMesh.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflare-mesh-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: cloudflare-mesh-operator
+spec:
+  replicas: {{ int .Values.cloudflareMesh.operator.replicas }}
+  selector:
+    matchLabels:
+      app: cloudflare-mesh-operator
+  template:
+    metadata:
+      labels:
+        app: cloudflare-mesh-operator
+    spec:
+      hostNetwork: true
+      priorityClassName: system-cluster-critical
+      tolerations:
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
+      serviceAccountName: cloudflare-mesh-operator
+      containers:
+      - name: operator
+        {{- $operatorRepository := default .Values.flannel.image.repository .Values.cloudflareMesh.operator.image.repository }}
+        {{- $operatorTag := default .Values.flannel.image.tag .Values.cloudflareMesh.operator.image.tag }}
+        {{- $operatorDigest := default .Values.flannel.image.digest .Values.cloudflareMesh.operator.image.digest }}
+        image: {{ $operatorRepository }}{{- if $operatorDigest }}@{{ $operatorDigest }}{{- else }}:{{ $operatorTag }}{{- end }}
+        command:
+        - /opt/bin/cloudflare-mesh-operator
+        args:
+        - --cloudflare-account-id={{ required "cloudflareMesh.accountID is required" .Values.cloudflareMesh.accountID }}
+        - --cloudflare-api-token-file=/var/run/secrets/cloudflare-mesh/api-token
+        - --namespace={{ .Release.Namespace }}
+        - --leader-election-namespace={{ .Release.Namespace }}
+        - --cluster-name={{ .Values.cloudflareMesh.clusterName }}
+        - --connector-prefix={{ .Values.cloudflareMesh.connectorPrefix }}
+        - --secret-prefix={{ .Values.cloudflareMesh.secretPrefix }}
+        - --sync-period={{ .Values.cloudflareMesh.operator.syncPeriod }}
+        - --registration-gc={{ .Values.cloudflareMesh.operator.registrationGC }}
+        - --registration-gc-period={{ .Values.cloudflareMesh.operator.registrationGCPeriod }}
+        - --connector-ha={{ .Values.cloudflareMesh.connectorHA }}
+        - --coredns-node-hosts-enabled={{ .Values.cloudflareMesh.coreDNSNodeHosts.enabled }}
+        - --coredns-namespace={{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}
+        - --coredns-configmap-name={{ .Values.cloudflareMesh.coreDNSNodeHosts.configMapName }}
+        - --coredns-node-hosts-key={{ .Values.cloudflareMesh.coreDNSNodeHosts.dataKey }}
+        - --coredns-hostname-suffix={{ .Values.cloudflareMesh.coreDNSNodeHosts.hostnameSuffix }}
+        - --coredns-rollout-kind={{ .Values.cloudflareMesh.coreDNSNodeHosts.rolloutKind }}
+        - --coredns-rollout-name={{ .Values.cloudflareMesh.coreDNSNodeHosts.rolloutName }}
+        {{- if .Values.cloudflareMesh.operator.nodeSelector }}
+        - --node-selector={{ .Values.cloudflareMesh.operator.nodeSelector }}
+        {{- end }}
+        {{- with .Values.cloudflareMesh.operator.extraEnv }}
+        env:
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        volumeMounts:
+        - name: api-token
+          mountPath: /var/run/secrets/cloudflare-mesh
+          readOnly: true
+        resources:
+          {{- toYaml .Values.cloudflareMesh.operator.resources | nindent 10 }}
+      volumes:
+      - name: api-token
+        secret:
+          secretName: {{ .Values.cloudflareMesh.apiTokenSecret.name }}
+          items:
+          - key: {{ .Values.cloudflareMesh.apiTokenSecret.key }}
+            path: api-token
+{{- end }}

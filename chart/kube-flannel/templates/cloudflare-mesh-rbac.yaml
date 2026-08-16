@@ -1,0 +1,115 @@
+{{- if .Values.cloudflareMesh.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudflare-mesh-operator
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudflare-mesh-operator
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudflare-mesh-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloudflare-mesh-operator
+subjects:
+- kind: ServiceAccount
+  name: cloudflare-mesh-operator
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloudflare-mesh-operator
+  namespace: {{ .Release.Namespace }}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloudflare-mesh-operator
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloudflare-mesh-operator
+subjects:
+- kind: ServiceAccount
+  name: cloudflare-mesh-operator
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloudflare-mesh-flannel-bootstrap
+  namespace: {{ .Release.Namespace }}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloudflare-mesh-flannel-bootstrap
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloudflare-mesh-flannel-bootstrap
+subjects:
+- kind: ServiceAccount
+  name: flannel
+  namespace: {{ .Release.Namespace }}
+{{- if .Values.cloudflareMesh.coreDNSNodeHosts.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloudflare-mesh-operator-coredns-nodehosts
+  namespace: {{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: [{{ .Values.cloudflareMesh.coreDNSNodeHosts.configMapName | quote }}]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["apps"]
+  {{- if eq (lower .Values.cloudflareMesh.coreDNSNodeHosts.rolloutKind) "daemonset" }}
+  resources: ["daemonsets"]
+  {{- else }}
+  resources: ["deployments"]
+  {{- end }}
+  resourceNames: [{{ .Values.cloudflareMesh.coreDNSNodeHosts.rolloutName | quote }}]
+  verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloudflare-mesh-operator-coredns-nodehosts
+  namespace: {{ .Values.cloudflareMesh.coreDNSNodeHosts.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloudflare-mesh-operator-coredns-nodehosts
+subjects:
+- kind: ServiceAccount
+  name: cloudflare-mesh-operator
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

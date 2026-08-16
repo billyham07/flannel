@@ -13,6 +13,7 @@ flannel:
   image:
     repository: ghcr.io/flannel-io/flannel
     tag: v0.28.9
+    digest: ""
   flannel_cni:
     image:
       repository: ghcr.io/flannel-io/flannel-cni-plugin
@@ -29,8 +30,11 @@ flannel:
   args:
   - "--ip-masq"
   - "--kube-subnet-mgr"
+  # Extra environment variables for flanneld. This can override the injected
+  # Kubernetes service host when the API is reached through a node underlay.
+  extraEnv: []
   # Backend for kube-flannel. Backend should not be changed
-  # at runtime. (vxlan, host-gw, wireguard, udp)
+  # at runtime. (vxlan, host-gw, wireguard, udp, cloudflare-mesh)
   # Documentation at https://github.com/flannel-io/flannel/blob/master/Documentation/backends.md
   backend: "vxlan"
   # Port used by the backend 0 means default value (VXLAN: 8472, Wireguard: 51821, UDP: 8285)
@@ -112,3 +116,59 @@ netpol:
   image:
     repository: registry.k8s.io/networking/kube-network-policies
     tag: v1.0.0
+
+cloudflareMesh:
+  enabled: false
+  accountID: ""
+  clusterName: "default"
+  connectorPrefix: "flannel-"
+  connectorHA: false
+  meshCIDR: "100.96.0.0/12"
+  routeTable: 51820
+  mtu: 1280
+  keepalivePeriod: "30s"
+  secretPrefix: "cloudflare-mesh-node-"
+  stateHostPath: "/var/lib/flannel/cloudflare-mesh"
+  connectTimeout: "3m"
+  # Emergency overrides for the native client fingerprint Cloudflare matches
+  # this backend against. Leave empty to use the known-good built-in values.
+  # Set them only when Cloudflare starts refusing enrollment because it retired
+  # the WARP build the backend presents itself as; that way a cluster can be
+  # unblocked without waiting for a new flannel image.
+  compat:
+    clientVersion: ""
+    deviceVersion: ""
+    registrationAPI: ""
+  apiTokenSecret:
+    name: "cloudflare-mesh-api-token"
+    key: "api-token"
+  operator:
+    replicas: 2
+    syncPeriod: "15s"
+    # Reclaim WARP device registrations orphaned by re-enrolled nodes.
+    # "dryrun" logs what it would delete without deleting it, "on" deletes,
+    # "off" skips the API calls entirely. "on" and "dryrun" need the Zero Trust
+    # scope on the API token.
+    registrationGC: "dryrun"
+    # Paced separately from syncPeriod: listing registrations is an
+    # account-wide paginated call, while an orphan costs nothing to leave in
+    # place for a few minutes.
+    registrationGCPeriod: "10m"
+    nodeSelector: ""
+    extraEnv: []
+    image:
+      repository: ""
+      tag: ""
+      digest: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+  coreDNSNodeHosts:
+    enabled: true
+    namespace: "kube-system"
+    configMapName: "coredns"
+    dataKey: "NodeHosts"
+    hostnameSuffix: "-mesh"
+    rolloutKind: "daemonset"
+    rolloutName: "coredns"
