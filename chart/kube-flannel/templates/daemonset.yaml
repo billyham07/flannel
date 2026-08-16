@@ -125,17 +125,19 @@ spec:
         - name: CONT_WHEN_CACHE_NOT_READY
           value: "false"
         {{- if .Values.cloudflareMesh.enabled }}
-        {{- with .Values.cloudflareMesh.compat.clientVersion }}
+        {{- with .Values.cloudflareMesh.compat }}
+        {{- with .clientVersion }}
         - name: CLOUDFLARE_MESH_CLIENT_VERSION
           value: {{ . | quote }}
         {{- end }}
-        {{- with .Values.cloudflareMesh.compat.deviceVersion }}
+        {{- with .deviceVersion }}
         - name: CLOUDFLARE_MESH_DEVICE_VERSION
           value: {{ . | quote }}
         {{- end }}
-        {{- with .Values.cloudflareMesh.compat.registrationAPI }}
+        {{- with .registrationAPI }}
         - name: CLOUDFLARE_MESH_REGISTRATION_API
           value: {{ . | quote }}
+        {{- end }}
         {{- end }}
         {{- end }}
         {{- with .Values.flannel.extraEnv }}

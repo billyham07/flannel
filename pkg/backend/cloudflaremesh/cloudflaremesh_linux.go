@@ -51,6 +51,7 @@ func (b *meshBackend) RegisterNetwork(ctx context.Context, _ *sync.WaitGroup, ne
 		return nil, err
 	}
 	logCompatOverrides()
+	startPprofIfRequested()
 	connector, err := waitForOperatorCredentials(ctx, cfg)
 	if err != nil {
 		return nil, err
