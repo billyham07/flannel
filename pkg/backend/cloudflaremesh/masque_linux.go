@@ -65,21 +65,20 @@ var (
 var errRegistrationGone = errors.New("registration no longer exists at Cloudflare")
 
 const (
-	registrationAPI = "v0a974"
-	connectSNI      = "zt-masque.cloudflareclient.com"
-	connectURI      = "https://cloudflareaccess.com"
-	clientVersion   = "l-2026.7.974.2"
-	deviceVersion   = "2026.7.974.2"
-	gatewayID       = "03000200-0400-0500-0006-000700080009"
+	connectSNI = "zt-masque.cloudflareclient.com"
+	connectURI = "https://cloudflareaccess.com"
+	gatewayID  = "03000200-0400-0500-0006-000700080009"
 )
 
+type cloudflareError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
 type registrationEnvelope struct {
-	Success bool             `json:"success"`
-	Result  meshRegistration `json:"result"`
-	Errors  []struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	} `json:"errors"`
+	Success bool              `json:"success"`
+	Result  meshRegistration  `json:"result"`
+	Errors  []cloudflareError `json:"errors"`
 }
 
 type meshRegistration struct {
@@ -350,7 +349,7 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 	if err != nil {
 		return meshRegistration{}, nil, err
 	}
-	req.Header.Set("CF-Client-Version", clientVersion)
+	req.Header.Set("CF-Client-Version", compat().ClientVersion)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", "WARP for Linux")
@@ -369,7 +368,7 @@ func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.Co
 		return meshRegistration{}, nil, fmt.Errorf("decode connector enrollment HTTP %d: %w", resp.StatusCode, err)
 	}
 	if resp.StatusCode != http.StatusOK || !envelope.Success || !envelope.Result.IsConnector || envelope.Result.Account.AccountType != "team" {
-		return meshRegistration{}, nil, fmt.Errorf("Cloudflare rejected native connector enrollment: HTTP %d connector=%t account=%q", resp.StatusCode, envelope.Result.IsConnector, envelope.Result.Account.AccountType)
+		return meshRegistration{}, nil, enrollmentRejected(resp.StatusCode, envelope)
 	}
 	if strings.TrimSpace(envelope.Result.Token) == "" {
 		return meshRegistration{}, nil, errors.New("Cloudflare connector enrollment returned no device token")
@@ -401,7 +400,7 @@ func refreshRegistration(ctx context.Context, client *http.Client, registration 
 	if err != nil {
 		return meshRegistration{}, err
 	}
-	endpoint := zeroTrustAPIBase + "/" + registrationAPI + "/reg/" + registration.ID
+	endpoint := zeroTrustAPIBase + "/" + compat().RegistrationAPI + "/reg/" + registration.ID
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return meshRegistration{}, err
@@ -416,7 +415,7 @@ func refreshRegistration(ctx context.Context, client *http.Client, registration 
 	if err != nil {
 		return meshRegistration{}, err
 	}
-	if err := registrationRefreshError(resp.StatusCode); err != nil {
+	if err := registrationRefreshError(resp.StatusCode, raw); err != nil {
 		return meshRegistration{}, err
 	}
 	var refreshed meshRegistration
@@ -451,7 +450,7 @@ func deleteRegistration(ctx context.Context, client *http.Client, registration m
 	if registration.ID == "" || strings.TrimSpace(registration.Token) == "" {
 		return errors.New("registration is incomplete")
 	}
-	endpoint := zeroTrustAPIBase + "/" + registrationAPI + "/reg/" + registration.ID
+	endpoint := zeroTrustAPIBase + "/" + compat().RegistrationAPI + "/reg/" + registration.ID
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
 	if err != nil {
 		return err
@@ -477,15 +476,60 @@ func deleteRegistration(ctx context.Context, client *http.Client, registration m
 // registration that has been deleted answers for the device token as well as
 // the record, so 401 and 403 mean the same thing here as 404: this node's
 // identity is gone and has to be re-established.
-func registrationRefreshError(statusCode int) error {
+func registrationRefreshError(statusCode int, body []byte) error {
 	switch statusCode {
 	case http.StatusOK:
 		return nil
 	case http.StatusNotFound, http.StatusGone, http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("%w (HTTP %d)", errRegistrationGone, statusCode)
+		return fmt.Errorf("%w (HTTP %d)%s", errRegistrationGone, statusCode, cloudflareErrorDetail(body))
 	default:
-		return fmt.Errorf("refresh native Mesh registration: HTTP %d", statusCode)
+		return fmt.Errorf("refresh native Mesh registration: HTTP %d%s", statusCode, cloudflareErrorDetail(body))
 	}
+}
+
+// enrollmentRejected builds the error for a refused connector enrollment.
+// Cloudflare's errors[] entries are the only actionable part of the response,
+// and a 4xx here is far more often the native client fingerprint going stale
+// than anything to do with this cluster, so the error says so and names the
+// overrides that can fix it without a new image.
+func enrollmentRejected(statusCode int, envelope registrationEnvelope) error {
+	message := fmt.Sprintf("Cloudflare rejected native connector enrollment: HTTP %d connector=%t account=%q%s",
+		statusCode, envelope.Result.IsConnector, envelope.Result.Account.AccountType, formatCloudflareErrors(envelope.Errors))
+	if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
+		message += "; " + compat().compatHint()
+	}
+	return errors.New(message)
+}
+
+// cloudflareErrorDetail extracts errors[] from a response body that may or may
+// not be a Cloudflare envelope. A body that is not one yields no detail rather
+// than an error: the status code alone is still a usable diagnosis.
+func cloudflareErrorDetail(body []byte) string {
+	var envelope struct {
+		Errors []cloudflareError `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	return formatCloudflareErrors(envelope.Errors)
+}
+
+func formatCloudflareErrors(cloudflareErrors []cloudflareError) string {
+	parts := make([]string, 0, len(cloudflareErrors))
+	for _, item := range cloudflareErrors {
+		switch {
+		case item.Message == "":
+			parts = append(parts, fmt.Sprintf("code %d", item.Code))
+		case item.Code == 0:
+			parts = append(parts, item.Message)
+		default:
+			parts = append(parts, fmt.Sprintf("%d: %s", item.Code, item.Message))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ": " + strings.Join(parts, "; ")
 }
 
 func deviceRegistrationID(value string) string {
@@ -494,7 +538,7 @@ func deviceRegistrationID(value string) string {
 
 func setDeviceAPIHeaders(req *http.Request, token string) {
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("CF-Client-Version", clientVersion)
+	req.Header.Set("CF-Client-Version", compat().ClientVersion)
 	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", "WARP for Linux")
@@ -513,7 +557,7 @@ func (t *nativeTransport) reportDeviceState(ctx context.Context, status, tunnelT
 		AlwaysOn:       true,
 		RegistrationID: deviceRegistrationID(t.registration.ID),
 		DOHSubdomain:   accountID + ".cloudflare-gateway.com",
-		ClientVersion:  deviceVersion,
+		ClientVersion:  compat().DeviceVersion,
 		ClientPlatform: "linux",
 		WarpMetal:      "none",
 		WarpColo:       "none",
@@ -618,18 +662,26 @@ func (t *nativeTransport) run(ctx context.Context) {
 	// must not observe the supervisor as finished before the TUN is gone.
 	defer close(t.done)
 	defer t.iface.Close()
-	outbound := make(chan []byte, 256)
+	// Buffers are recycled rather than allocated per packet; see tunBufferPool
+	// for the ownership rules the reader and the writer pump both follow.
+	pool := newTUNBufferPool(tunBufferPoolSize, t.cfg.MTU)
+	outbound := make(chan []byte, outboundQueueDepth)
 	go func() {
 		for {
-			buf := make([]byte, t.cfg.MTU+1)
-			n, err := t.iface.Read(buf[1:])
+			buf, ok := pool.get(ctx)
+			if !ok {
+				return
+			}
+			n, err := t.iface.Read(buf[tunHeadroom:])
 			if err != nil {
+				pool.put(buf)
 				close(outbound)
 				return
 			}
 			select {
-			case outbound <- buf[:n+1]:
+			case outbound <- buf[:tunHeadroom+n]:
 			case <-ctx.Done():
+				pool.put(buf)
 				return
 			}
 		}
@@ -639,7 +691,7 @@ func (t *nativeTransport) run(ctx context.Context) {
 		log.Warningf("cloudflare-mesh: initial device-state report failed: %v", err)
 	}
 	for ctx.Err() == nil {
-		err := t.runSession(ctx, outbound)
+		err := t.runSession(ctx, outbound, pool)
 		if ctx.Err() != nil {
 			break
 		}
@@ -660,7 +712,7 @@ func (t *nativeTransport) run(ctx context.Context) {
 	}
 }
 
-func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte) error {
+func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte, pool *tunBufferPool) error {
 	if len(t.registration.Config.Peers) == 0 {
 		return errors.New("registration has no MASQUE peer")
 	}
@@ -730,16 +782,17 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 					errCh <- io.EOF
 					return
 				}
-				icmp, err := ipConn.WritePacketBuffer(packet, 1, len(packet)-1)
+				// quic-go copies the datagram payload before SendDatagram
+				// returns, and the ICMP reply is freshly composed, so the
+				// buffer is free again the moment this call comes back.
+				icmp, err := ipConn.WritePacketBuffer(packet, tunHeadroom, len(packet)-tunHeadroom)
+				if err == nil && len(icmp) > 0 {
+					_, err = t.iface.Write(icmp)
+				}
+				pool.put(packet)
 				if err != nil {
 					errCh <- err
 					return
-				}
-				if len(icmp) > 0 {
-					if _, err := t.iface.Write(icmp); err != nil {
-						errCh <- err
-						return
-					}
 				}
 			}
 		}

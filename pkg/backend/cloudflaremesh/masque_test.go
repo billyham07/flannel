@@ -83,20 +83,73 @@ func TestDeviceRegistrationID(t *testing.T) {
 }
 
 func TestRegistrationRefreshError(t *testing.T) {
-	if err := registrationRefreshError(200); err != nil {
+	if err := registrationRefreshError(200, nil); err != nil {
 		t.Fatalf("200 should refresh cleanly, got %v", err)
 	}
 	for _, status := range []int{401, 403, 404, 410} {
-		if err := registrationRefreshError(status); !errors.Is(err, errRegistrationGone) {
+		if err := registrationRefreshError(status, nil); !errors.Is(err, errRegistrationGone) {
 			t.Fatalf("HTTP %d should report the registration as gone, got %v", status, err)
 		}
 	}
 	// A transient server-side fault must not be mistaken for deletion, or a
 	// Cloudflare blip would burn a new registration and a new Mesh IP.
 	for _, status := range []int{429, 500, 502, 503} {
-		if err := registrationRefreshError(status); err == nil || errors.Is(err, errRegistrationGone) {
+		if err := registrationRefreshError(status, nil); err == nil || errors.Is(err, errRegistrationGone) {
 			t.Fatalf("HTTP %d should be a plain failure, got %v", status, err)
 		}
+	}
+}
+
+// Whatever Cloudflare says about a rejection is the only part an operator can
+// act on, so it has to reach the log rather than being reduced to a status
+// code. A body that is not an error envelope must not break the message.
+func TestRegistrationRefreshErrorIncludesCloudflareDetail(t *testing.T) {
+	body := []byte(`{"success":false,"errors":[{"code":1002,"message":"client version too old"}]}`)
+	err := registrationRefreshError(http.StatusForbidden, body)
+	if err == nil || !strings.Contains(err.Error(), "1002: client version too old") {
+		t.Fatalf("refresh error lost the Cloudflare detail: %v", err)
+	}
+	if err := registrationRefreshError(http.StatusForbidden, []byte("not json")); !errors.Is(err, errRegistrationGone) {
+		t.Fatalf("unparseable body should still classify the failure: %v", err)
+	}
+}
+
+// A 4xx on enrollment is usually Cloudflare retiring the client build this
+// backend impersonates, so the error has to name the overrides that fix it.
+func TestEnrollmentRejectedExplainsCompatibility(t *testing.T) {
+	envelope := registrationEnvelope{Errors: []cloudflareError{{Code: 1004, Message: "unsupported client"}}}
+	err := enrollmentRejected(http.StatusBadRequest, envelope)
+	for _, want := range []string{"1004: unsupported client", defaultClientVersion, clientVersionEnv, registrationAPIEnv} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("enrollment error is missing %q: %v", want, err)
+		}
+	}
+
+	// A server-side fault is not a compatibility problem and must not be
+	// reported as one.
+	serverErr := enrollmentRejected(http.StatusBadGateway, envelope)
+	if strings.Contains(serverErr.Error(), clientVersionEnv) {
+		t.Fatalf("HTTP 502 should not blame the client fingerprint: %v", serverErr)
+	}
+}
+
+func TestCompatOverrides(t *testing.T) {
+	if got := compat(); got.ClientVersion != defaultClientVersion ||
+		got.DeviceVersion != defaultDeviceVersion || got.RegistrationAPI != defaultRegistrationAPI {
+		t.Fatalf("unset environment must keep the known-good defaults, got %+v", got)
+	}
+	t.Setenv(clientVersionEnv, "l-2027.1.1.0")
+	t.Setenv(deviceVersionEnv, "2027.1.1.0")
+	t.Setenv(registrationAPIEnv, "v0a999")
+	got := compat()
+	if got.ClientVersion != "l-2027.1.1.0" || got.DeviceVersion != "2027.1.1.0" || got.RegistrationAPI != "v0a999" {
+		t.Fatalf("overrides were not applied: %+v", got)
+	}
+	// Whitespace-only values come from a Helm value someone left blank; they
+	// must fall back rather than send an empty fingerprint to Cloudflare.
+	t.Setenv(clientVersionEnv, "   ")
+	if got := compat(); got.ClientVersion != defaultClientVersion {
+		t.Fatalf("blank override should fall back, got %q", got.ClientVersion)
 	}
 }
 

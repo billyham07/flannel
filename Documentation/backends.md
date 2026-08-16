@@ -144,7 +144,6 @@ Backend configuration:
   "Network": "10.244.0.0/16",
   "Backend": {
     "Type": "cloudflare-mesh",
-    "ControlPlaneMode": "operator",
     "OperatorNamespace": "kube-flannel",
     "OperatorSecretPrefix": "cloudflare-mesh-node-",
     "StateFile": "/var/lib/flannel/cloudflare-mesh/state.json",
@@ -157,6 +156,28 @@ Backend configuration:
   }
 }
 ```
+
+Every node gets its connector from the operator's per-node bootstrap Secret, so
+the backend stanza never carries Cloudflare account credentials; the account API
+token stays confined to the operator.
+
+Cloudflare only enrols clients whose build it recognises, so the backend
+presents the fingerprint of a known-good WARP for Linux release. If Cloudflare
+retires that build, enrollment starts failing with a 4xx and the error names the
+three values involved. Each can be overridden through the environment, which
+unblocks a cluster without waiting for a new image:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CLOUDFLARE_MESH_CLIENT_VERSION` | `l-2026.7.974.2` | `CF-Client-Version` request header |
+| `CLOUDFLARE_MESH_DEVICE_VERSION` | `2026.7.974.2` | version reported in device-state updates |
+| `CLOUDFLARE_MESH_REGISTRATION_API` | `v0a974` | registration API path segment |
+
+The Helm chart exposes these as `cloudflareMesh.compat.clientVersion`,
+`cloudflareMesh.compat.deviceVersion` and
+`cloudflareMesh.compat.registrationAPI`. Leave them empty unless Cloudflare is
+actively rejecting enrollment; a node running with an override says so in its
+log.
 
 The state file contains the node's P-256 private key and Cloudflare registration
 response. It is written atomically with mode `0600` to the per-node host path.

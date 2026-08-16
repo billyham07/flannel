@@ -130,6 +130,15 @@ cloudflareMesh:
   secretPrefix: "cloudflare-mesh-node-"
   stateHostPath: "/var/lib/flannel/cloudflare-mesh"
   connectTimeout: "3m"
+  # Emergency overrides for the native client fingerprint Cloudflare matches
+  # this backend against. Leave empty to use the known-good built-in values.
+  # Set them only when Cloudflare starts refusing enrollment because it retired
+  # the WARP build the backend presents itself as; that way a cluster can be
+  # unblocked without waiting for a new flannel image.
+  compat:
+    clientVersion: ""
+    deviceVersion: ""
+    registrationAPI: ""
   apiTokenSecret:
     name: "cloudflare-mesh-api-token"
     key: "api-token"

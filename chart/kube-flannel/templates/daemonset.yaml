@@ -124,6 +124,20 @@ spec:
           value: "5000"
         - name: CONT_WHEN_CACHE_NOT_READY
           value: "false"
+        {{- if .Values.cloudflareMesh.enabled }}
+        {{- with .Values.cloudflareMesh.compat.clientVersion }}
+        - name: CLOUDFLARE_MESH_CLIENT_VERSION
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.cloudflareMesh.compat.deviceVersion }}
+        - name: CLOUDFLARE_MESH_DEVICE_VERSION
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.cloudflareMesh.compat.registrationAPI }}
+        - name: CLOUDFLARE_MESH_REGISTRATION_API
+          value: {{ . | quote }}
+        {{- end }}
+        {{- end }}
         {{- with .Values.flannel.extraEnv }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
