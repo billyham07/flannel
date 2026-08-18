@@ -64,6 +64,11 @@ var (
 // operator's registration GC. It is recoverable: the node enrols again.
 var errRegistrationGone = errors.New("registration no longer exists at Cloudflare")
 
+// sessionHealthyAfter is how long a MASQUE session has to stay up before the
+// reconnect supervisor treats it as healthy and drops back to the shortest
+// retry delay.
+const sessionHealthyAfter = 2 * time.Minute
+
 const (
 	connectSNI = "zt-masque.cloudflareclient.com"
 	connectURI = "https://cloudflareaccess.com"
@@ -691,9 +696,16 @@ func (t *nativeTransport) run(ctx context.Context) {
 		log.Warningf("cloudflare-mesh: initial device-state report failed: %v", err)
 	}
 	for ctx.Err() == nil {
+		started := time.Now()
 		err := t.runSession(ctx, outbound, pool)
 		if ctx.Err() != nil {
 			break
+		}
+		// A session that carried traffic for a while is evidence the endpoint
+		// is healthy, so the next blip should reconnect immediately rather
+		// than inherit the backoff a long-past outage left behind.
+		if time.Since(started) >= sessionHealthyAfter {
+			delay = time.Second
 		}
 		log.Warningf("cloudflare-mesh: MASQUE session lost: %v; reconnecting in %s", err, delay)
 		timer := time.NewTimer(delay)
@@ -753,7 +765,7 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 	}
 	endpoint := &net.UDPAddr{IP: endpointIP, Port: 443}
 	tunnelType := "masque"
-	ipConn, response, closeSession, err := dialHTTP3(ctx, tlsConfig, endpoint, t.cfg.KeepaliveEvery)
+	ipConn, response, closeSession, err := dialHTTP3(ctx, tlsConfig, endpoint, t.cfg.KeepaliveEvery, t.cfg.MTU)
 	if err != nil {
 		return err
 	}
@@ -832,13 +844,17 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 	return sessionErr
 }
 
-func dialHTTP3(ctx context.Context, tlsConfig *tls.Config, endpoint *net.UDPAddr, keepalive time.Duration) (*connectip.Conn, *http.Response, func(), error) {
+func dialHTTP3(ctx context.Context, tlsConfig *tls.Config, endpoint *net.UDPAddr, keepalive time.Duration, mtu int) (*connectip.Conn, *http.Response, func(), error) {
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
 		return nil, nil, func() {}, err
 	}
 	qtr := &quic.Transport{Conn: udpConn, ConnectionIDLength: 20}
-	qconn, err := qtr.Dial(ctx, endpoint, tlsConfig, &quic.Config{EnableDatagrams: true, KeepAlivePeriod: keepalive})
+	qconn, err := qtr.Dial(ctx, endpoint, tlsConfig, &quic.Config{
+		EnableDatagrams:   true,
+		KeepAlivePeriod:   keepalive,
+		InitialPacketSize: quicInitialPacketSize(mtu),
+	})
 	if err != nil {
 		_ = qtr.Close()
 		_ = udpConn.Close()
