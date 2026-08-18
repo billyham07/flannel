@@ -1,0 +1,155 @@
+# Cloudflare Mesh syscall profiling
+
+This note captures the current performance evidence for the native MASQUE transport, what it turned out to explain, and what is still unmeasured.
+
+## Baseline
+
+A 60 second Mesh-IP to Mesh-IP iperf3 run after adding the bounded TUN buffer pool showed:
+
+- throughput: 179 Mbit/s before and after
+- retransmits: 15,150 -> 12,850
+- flanneld CPU: 98.4% -> 94.7% of one core
+- GC cycles: 20.9/s -> 13.3/s
+
+The CPU profile after the buffer-pool change is dominated by syscall cost:
+
+- sendmsg: 35.9%
+- TUN write: 10.0%
+- recvmsg: 6.7%
+- scheduler: ~12%
+- mallocgc: 3.2%
+- GC scan: 1.9%
+- AES-GCM: 1.0%
+
+A differential allocation profile shows no flat allocation in `pkg/backend/cloudflaremesh`; most remaining allocation is quic-go taking ownership of datagrams.
+
+## Is UDP GSO batching our packets?
+
+No, and it cannot, so this does not need to be measured. It is a structural property of
+how quic-go v0.60.0 packs and sends QUIC DATAGRAM frames.
+
+- `packet_packer.go:654` takes **at most one** DATAGRAM frame per QUIC packet. It peeks
+  the datagram queue once; there is no loop that fills the remaining payload.
+- `connection.go:2633` only coalesces another packet into the same GSO batch when the
+  packet just appended came out **exactly** `maxPacketSize` bytes long:
+
+  ```go
+  if !dontSendMore && size == maxSize && nextECN == ecn && buf.Len()+maxSize <= buf.Cap() {
+  ```
+
+A CONNECT-IP packet never satisfies that. At MTU 1280 the datagram is 1282 bytes (the IP
+packet, the CONNECT-IP context ID and the HTTP/3 quarter-stream ID), the DATAGRAM frame
+adds 3, and the short header plus AEAD tag add 18 to 41 depending on the connection ID
+and packet number length -- 1303 to 1326 bytes against a
+`maxPacketSize` that path MTU discovery pushes to 1452. The packet is always short of
+`maxSize`, the loop always breaks, and every DATAGRAM leaves in its own `sendmsg`.
+
+So `avg_packets_per_send` is 1.0 by construction, and the 35.9% is one `sendmsg` per pod
+packet. Note this is a send-side-only problem: quic-go already reads with `recvmmsg` in
+batches of 8 (`sys_conn_helper_linux.go:24`), which is why `recvmsg` is only 6.7%.
+
+Measured on wmhknodel5, `strace -c -f` over a 15 second single-stream transfer that moved
+181 MBytes, which is about 153,000 packets at the 1240 byte MSS:
+
+```
+% time     seconds  usecs/call     calls    errors syscall
+ 39.98    3.181900          20    155063           sendmsg
+ 30.43    2.421904          15    159440      4224 read
+ 20.58    1.638237          21     76799           write
+  8.90    0.708555          17     39571     10534 recvmmsg
+  0.10    0.008175           4      1745           recvmsg
+```
+
+155,063 `sendmsg` for ~153,000 packets is 1.01 per packet, and `sendmmsg` was never called
+at all. The host's `Udp: OutDatagrams` counter agrees: 477,475 sends against ~484,500
+packets over a separate 30 second run. `recvmmsg` doing the receive side in 39,571 calls is
+the contrast.
+
+Getting batching would need a change in quic-go: coalesce consecutive packets of *equal*
+size rather than only full-size ones. `UDP_SEGMENT` allows that -- it only requires every
+segment but the last to be the same length -- and it would benefit every
+DATAGRAM-carrying application, not just this backend. Padding our datagrams up to
+`maxPacketSize` from this side is not a workaround: the packet number length changes
+underneath us, so the target moves.
+
+## The MTU and the QUIC packet size were unrelated numbers
+
+Chasing the size arithmetic above turned up a defect rather than an optimisation.
+
+quic-go starts every connection at `InitialPacketSize` (1280 by default) and refuses a
+datagram that does not fit the current packet size. It only grows through path MTU
+discovery, five RTTs per probe. A 1280 byte pod packet needs a QUIC packet of at least
+1325 bytes, so until discovery lifts the estimate, **every full-size pod packet is
+rejected**.
+
+The rejection is invisible. connect-ip-go answers `DatagramTooLargeError` by composing an
+ICMP "fragmentation needed" quoting its `minMTU` of 1280, which is already the TUN MTU, so
+the sender has nothing to shrink and simply retransmits. On a path whose MTU never reaches
+1325 this is permanent: small packets flow, large packets black-hole, TCP hangs.
+
+The fix is to derive one number from the other. `quicInitialPacketSize` now sizes the
+session from the configured MTU (`config.go`), and `loadConfig` rejects an MTU larger than
+any CONNECT-IP datagram can carry. Path MTU discovery still runs on top and can grow the
+packet further.
+
+This is worth re-running the benchmark against: some fraction of the 12,850 retransmits
+may be full-size packets discarded during the discovery window at the start of the session,
+and there is one such window per reconnect.
+
+## flanneld is not the bottleneck
+
+The ~179 Mbit/s ceiling is per peer pair, and it is the Cloudflare path, not this
+dataplane. Measured on the five-node cluster, 30 second iperf3 runs between Mesh IPs,
+receiver-side figures:
+
+| test | what runs | result |
+| --- | --- | --- |
+| one stream, HK->HK | baseline | 147 Mbit/s |
+| eight streams, HK->HK | is one stream loss-limited? | 155 Mbit/s |
+| eight streams, JP->SYD | second pair alone | 151 Mbit/s |
+| both pairs at once | two independent sessions | 154 + 149 Mbit/s |
+| HK->HK and HK->SYD, from one node | one flanneld, one MASQUE session | 149 + 154 = **303** Mbit/s |
+| three destinations, from one node | same | 125 + 161 + 148 = **434** Mbit/s |
+
+Eight streams barely beat one, so the per-pair number is not inner-TCP loss. Two separate
+node pairs do not contend, so it is not an account-wide limit. But one node fanning out to
+three peers gets 434 Mbit/s through a **single** flanneld and a **single** QUIC connection
+-- about three times what any one peer pair will give it.
+
+So the transport has at least 3x headroom over what a single peer can use. Syscall batching
+would buy CPU, not throughput.
+
+CPU is still worth buying. At 434 Mbit/s flanneld cost 118% of one core, on a node that has
+two cores in total -- roughly a quarter of a core per 100 Mbit/s. On small nodes that is the
+real constraint, and it is what the `sendmsg`-per-packet result above translates into.
+
+## Still unmeasured
+
+Whether the QUIC DATAGRAM receive queue is dropping. quic-go caps it at 128
+(`datagram_queue.go:16`) and discards silently beyond that. Our reader consumes it with a
+blocking TUN write, so a slow TUN turns directly into drops that the inner TCP sees as
+loss. Worth correlating receive-queue drops and high-water mark against inner TCP
+retransmits, which ran at 732 for a 30 second single stream and 2,277 for eight.
+
+## Where the remaining syscalls are
+
+Ranked, for whenever CPU per Mbit/s becomes worth reducing:
+
+1. `sendmsg`, 35.9%, one per packet -- needs the quic-go GSO change above.
+2. TUN read and write, ~10% plus part of the read cost -- needs `IFF_VNET_HDR` with
+   TSO/GRO so the kernel hands over 64 KB segments instead of one packet per syscall.
+   `songgao/water` cannot do this; `golang.zx2c4.com/wireguard/tun` can, and its batched
+   `Read`/`Write` API is the shape this dataplane already has.
+
+Both are large changes, and neither raises throughput: they lower the quarter-core per
+100 Mbit/s. Do them when node CPU is the complaint, not when throughput is.
+
+## Guardrails
+
+Do not wrap `*net.UDPConn` with a generic `net.PacketConn` just to count writes. quic-go
+relies on the concrete UDP connection to enable Linux UDP fast paths such as GSO; changing
+the connection type would contaminate the benchmark.
+
+Do not change TUN queueing, checksum behavior, congestion control, or MASQUE framing while
+measuring. The MTU-to-packet-size fix above is deliberately the only dataplane-visible
+change, so the next benchmark measures it and nothing else.

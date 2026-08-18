@@ -38,6 +38,38 @@ const (
 	cloudflareNodeNameEnv  = "NODE_NAME"
 )
 
+// quicDatagramOverhead is how much larger a QUIC packet is than the IP packet
+// it carries, on the CONNECT-IP-over-HTTP/3 path:
+//
+//	 1  CONNECT-IP context ID varint (tunHeadroom)
+//	 4  HTTP/3 quarter-stream-ID varint (1 in practice, rounded up for slack)
+//	 3  DATAGRAM frame type plus its length varint
+//	37  what quic-go conservatively reserves for the short header and the AEAD
+//	    tag when it decides whether a datagram fits (1 type + 20 connection ID
+//	    + 16 tag)
+//
+// quic-go rejects a datagram unless the connection's current packet size can
+// hold all of it, so a MASQUE session can only carry a full-MTU packet once
+// its packet size is at least MTU+quicDatagramOverhead.
+const quicDatagramOverhead = 45
+
+// maxQUICPacketSize mirrors quic-go's protocol.MaxPacketBufferSize, the largest
+// packet it will ever send.
+const maxQUICPacketSize = 1452
+
+// quicInitialPacketSize is the packet size a session starts at, sized so a
+// full-MTU packet fits from the first datagram onwards.
+//
+// Without this quic-go starts every session at 1280 bytes and only grows via
+// path MTU discovery, which leaves a window -- and, on a path whose MTU never
+// reaches MTU+quicDatagramOverhead, a permanent state -- where every full-size
+// pod packet is rejected. Those rejections are invisible: connect-ip answers
+// them with an ICMP "fragmentation needed" quoting 1280, which is already the
+// TUN MTU, so the sender has nothing to shrink and just retransmits.
+func quicInitialPacketSize(mtu int) uint16 {
+	return uint16(min(mtu+quicDatagramOverhead, maxQUICPacketSize))
+}
+
 // config is the backend stanza of net-conf.json. The Cloudflare account
 // credentials deliberately do not appear here: every node gets its connector
 // from the operator's per-node bootstrap Secret, so the account API token stays
@@ -90,6 +122,12 @@ func loadConfig(raw json.RawMessage) (*runtimeConfig, error) {
 	}
 	if cfg.MTU < 1280 {
 		return nil, fmt.Errorf("MTU must be at least 1280")
+	}
+	// A larger MTU than this cannot be carried: the CONNECT-IP datagram that
+	// wraps the packet would not fit in the largest QUIC packet quic-go will
+	// ever send, so every full-size packet would be silently dropped.
+	if maxMTU := maxQUICPacketSize - quicDatagramOverhead; cfg.MTU > maxMTU {
+		return nil, fmt.Errorf("MTU must be at most %d, the largest packet a CONNECT-IP datagram can carry", maxMTU)
 	}
 
 	if cfg.NodeName == "" {
