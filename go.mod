@@ -5,8 +5,13 @@ go 1.25.9
 // replace github.com/dgrijalva/jwt-go => github.com/golang-jwt/jwt/v4 v4.2.0
 
 // Keep the v0.60.0 API while batching equal-sized short QUIC packets with UDP
-// GSO and exposing the bounded QUIC / HTTP/3 DATAGRAM receive queue counters.
-replace github.com/quic-go/quic-go => github.com/billyham07/quic-go v0.60.1-0.20260823130733-e77cddc154bd
+// GSO, exposing receive queue counters, and composing HTTP/3 DATAGRAM framing
+// in caller-provided headroom.
+replace github.com/quic-go/quic-go => github.com/billyham07/quic-go v0.60.1-0.20260823161721-ab8a746bdc77
+
+// Forward caller headroom from CONNECT-IP to quic-go's optional buffered
+// DATAGRAM API. Older HTTP/3 implementations continue to use SendDatagram.
+replace github.com/Diniboy1123/connect-ip-go => github.com/billyham07/connect-ip-go v0.0.0-20260823162011-4c7d0e50c1bb
 
 require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33
@@ -21,7 +26,6 @@ require (
 	github.com/jonboulle/clockwork v0.5.0
 	github.com/pkg/errors v0.9.1
 	github.com/quic-go/quic-go v0.60.0
-	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
 	github.com/yosida95/uritemplate/v3 v3.0.2
@@ -29,7 +33,7 @@ require (
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
-	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173 // indirect
+	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20230429144221-925a1e7659e6
 	k8s.io/api v0.33.13
 	k8s.io/apimachinery v0.33.13
@@ -111,6 +115,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.5.0 // indirect
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect

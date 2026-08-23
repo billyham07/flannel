@@ -41,6 +41,10 @@ type transportStats struct {
 	outboundQueueWaits     atomic.Uint64
 	poolExhaustions        atomic.Uint64
 	icmpTooLarge           atomic.Uint64
+	tunReadCalls           atomic.Uint64
+	tunReadPackets         atomic.Uint64
+	tunWriteCalls          atomic.Uint64
+	tunWritePackets        atomic.Uint64
 
 	sessionsStarted   atomic.Uint64
 	sessionsConnected atomic.Uint64
@@ -128,15 +132,21 @@ type transportStatsSnapshot struct {
 }
 
 type dataplaneStatsSnapshot struct {
-	TXPackets              uint64 `json:"tx_packets"`
-	TXBytes                uint64 `json:"tx_bytes"`
-	RXPackets              uint64 `json:"rx_packets"`
-	RXBytes                uint64 `json:"rx_bytes"`
-	OutboundQueueDepth     uint64 `json:"outbound_queue_depth"`
-	OutboundQueueHighWater uint64 `json:"outbound_queue_high_water"`
-	OutboundQueueWaits     uint64 `json:"outbound_queue_waits"`
-	PoolExhaustions        uint64 `json:"buffer_pool_exhaustions"`
-	ICMPTooLarge           uint64 `json:"icmp_too_large"`
+	TXPackets              uint64  `json:"tx_packets"`
+	TXBytes                uint64  `json:"tx_bytes"`
+	RXPackets              uint64  `json:"rx_packets"`
+	RXBytes                uint64  `json:"rx_bytes"`
+	OutboundQueueDepth     uint64  `json:"outbound_queue_depth"`
+	OutboundQueueHighWater uint64  `json:"outbound_queue_high_water"`
+	OutboundQueueWaits     uint64  `json:"outbound_queue_waits"`
+	PoolExhaustions        uint64  `json:"buffer_pool_exhaustions"`
+	ICMPTooLarge           uint64  `json:"icmp_too_large"`
+	TUNReadCalls           uint64  `json:"tun_read_calls"`
+	TUNReadPackets         uint64  `json:"tun_read_packets"`
+	TUNReadPacketsPerCall  float64 `json:"tun_read_packets_per_call"`
+	TUNWriteCalls          uint64  `json:"tun_write_calls"`
+	TUNWritePackets        uint64  `json:"tun_write_packets"`
+	TUNWritePacketsPerCall float64 `json:"tun_write_packets_per_call"`
 }
 
 type sessionStatsSnapshot struct {
@@ -177,6 +187,18 @@ type internalDropsSnapshot struct {
 }
 
 func (s *transportStats) snapshot() transportStatsSnapshot {
+	tunReadCalls := s.tunReadCalls.Load()
+	tunReadPackets := s.tunReadPackets.Load()
+	tunWriteCalls := s.tunWriteCalls.Load()
+	tunWritePackets := s.tunWritePackets.Load()
+	tunReadPacketsPerCall := float64(0)
+	if tunReadCalls != 0 {
+		tunReadPacketsPerCall = float64(tunReadPackets) / float64(tunReadCalls)
+	}
+	tunWritePacketsPerCall := float64(0)
+	if tunWriteCalls != 0 {
+		tunWritePacketsPerCall = float64(tunWritePackets) / float64(tunWriteCalls)
+	}
 	snapshot := transportStatsSnapshot{
 		Dataplane: dataplaneStatsSnapshot{
 			TXPackets: s.txPackets.Load(), TXBytes: s.txBytes.Load(),
@@ -185,6 +207,10 @@ func (s *transportStats) snapshot() transportStatsSnapshot {
 			OutboundQueueHighWater: s.outboundQueueHighWater.Load(),
 			OutboundQueueWaits:     s.outboundQueueWaits.Load(),
 			PoolExhaustions:        s.poolExhaustions.Load(), ICMPTooLarge: s.icmpTooLarge.Load(),
+			TUNReadCalls: tunReadCalls, TUNReadPackets: tunReadPackets,
+			TUNReadPacketsPerCall: tunReadPacketsPerCall,
+			TUNWriteCalls:         tunWriteCalls, TUNWritePackets: tunWritePackets,
+			TUNWritePacketsPerCall: tunWritePacketsPerCall,
 		},
 		Sessions: sessionStatsSnapshot{
 			Started: s.sessionsStarted.Load(), Connected: s.sessionsConnected.Load(),

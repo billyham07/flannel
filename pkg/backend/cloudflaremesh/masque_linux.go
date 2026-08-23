@@ -47,9 +47,9 @@ import (
 	meshapi "github.com/flannel-io/flannel/pkg/cloudflaremesh"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
 	"github.com/yosida95/uritemplate/v3"
+	"golang.zx2c4.com/wireguard/tun"
 	log "k8s.io/klog/v2"
 )
 
@@ -166,7 +166,7 @@ type deviceStatePayload struct {
 }
 
 type nativeTransport struct {
-	iface        *water.Interface
+	iface        tun.Device
 	registration meshRegistration
 	privateKey   *ecdsa.PrivateKey
 	cfg          *runtimeConfig
@@ -191,11 +191,20 @@ func startNativeTransport(ctx context.Context, cfg *runtimeConfig, connector *me
 	if meshIP == nil || !meshNetwork.Contains(meshIP) {
 		return nil, fmt.Errorf("Cloudflare returned connector IPv4 %q outside MeshCIDR %s", state.Config.Interface.Addresses.V4, meshNetwork)
 	}
-	dev, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: water.PlatformSpecificParams{Name: cfg.InterfaceName}})
+	dev, err := tun.CreateTUN(cfg.InterfaceName, cfg.MTU)
 	if err != nil {
 		return nil, fmt.Errorf("create %s TUN: %w", cfg.InterfaceName, err)
 	}
-	link, err := netlink.LinkByName(dev.Name())
+	if dev.BatchSize() < 1 {
+		dev.Close()
+		return nil, fmt.Errorf("create %s TUN: invalid batch size %d", cfg.InterfaceName, dev.BatchSize())
+	}
+	deviceName, err := dev.Name()
+	if err != nil {
+		dev.Close()
+		return nil, fmt.Errorf("get native Mesh TUN name: %w", err)
+	}
+	link, err := netlink.LinkByName(deviceName)
 	if err != nil {
 		dev.Close()
 		return nil, fmt.Errorf("find native Mesh TUN: %w", err)
@@ -673,25 +682,12 @@ func (t *nativeTransport) run(ctx context.Context) {
 	defer t.iface.Close()
 	// Buffers are recycled rather than allocated per packet; see tunBufferPool
 	// for the ownership rules the reader and the writer pump both follow.
-	pool := newTUNBufferPoolWithStats(tunBufferPoolSize, t.cfg.MTU, t.stats)
+	batchSize := t.iface.BatchSize()
+	pool := newTUNBufferPoolWithStats(tunBufferPoolSizeForBatch(batchSize), t.cfg.MTU, t.stats)
 	outbound := make(chan []byte, outboundQueueDepth)
 	go func() {
-		for {
-			buf, ok := pool.get(ctx)
-			if !ok {
-				return
-			}
-			n, err := t.iface.Read(buf[tunHeadroom:])
-			if err != nil {
-				pool.put(buf)
-				close(outbound)
-				return
-			}
-			if !enqueueOutbound(ctx, outbound, buf[:tunHeadroom+n], t.stats) {
-				pool.put(buf)
-				return
-			}
-		}
+		defer close(outbound)
+		_ = pumpTUNToOutbound(ctx, t.iface, batchSize, pool, outbound, t.stats)
 	}()
 	backoff := reconnectBackoff{}
 	if err := t.reportDeviceState(ctx, "Connecting", "masque"); err != nil {
@@ -823,6 +819,7 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 	pumps.Add(2)
 	go func() {
 		defer pumps.Done()
+		tunWriter := newTUNPacketWriter(t.iface, t.cfg.MTU, t.stats)
 		for {
 			select {
 			case <-sessionCtx.Done():
@@ -841,7 +838,7 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 				sent := err == nil && len(icmp) == 0
 				if err == nil && len(icmp) > 0 {
 					t.stats.icmpTooLarge.Add(1)
-					_, err = t.iface.Write(icmp)
+					err = tunWriter.write(icmp)
 				}
 				if sent {
 					t.stats.txPackets.Add(1)
@@ -871,13 +868,14 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 	}()
 	go func() {
 		defer pumps.Done()
+		tunWriter := newTUNPacketWriter(t.iface, t.cfg.MTU, t.stats)
 		for {
 			packet, err := ipConn.ReadPacketZeroCopy(true)
 			if err != nil {
 				errCh <- err
 				return
 			}
-			if _, err := t.iface.Write(packet); err != nil {
+			if err := tunWriter.write(packet); err != nil {
 				errCh <- err
 				return
 			}

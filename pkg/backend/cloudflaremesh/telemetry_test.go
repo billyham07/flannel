@@ -37,6 +37,10 @@ func TestTransportStatsSnapshotDoesNotInventInternalDrops(t *testing.T) {
 	stats.outboundQueueWaits.Add(2)
 	stats.poolExhaustions.Add(1)
 	stats.icmpTooLarge.Add(3)
+	stats.tunReadCalls.Add(3)
+	stats.tunReadPackets.Add(8)
+	stats.tunWriteCalls.Add(5)
+	stats.tunWritePackets.Add(5)
 	stats.sessionsStarted.Add(4)
 	stats.sessionsConnected.Add(3)
 	stats.sessionErrors.Add(2)
@@ -52,6 +56,12 @@ func TestTransportStatsSnapshotDoesNotInventInternalDrops(t *testing.T) {
 	}
 	if snapshot.Dataplane.OutboundQueueDepth != 4 || snapshot.Dataplane.OutboundQueueHighWater != 11 {
 		t.Fatalf("unexpected outbound queue gauges: %+v", snapshot.Dataplane)
+	}
+	if snapshot.Dataplane.TUNReadCalls != 3 || snapshot.Dataplane.TUNReadPackets != 8 ||
+		snapshot.Dataplane.TUNReadPacketsPerCall != float64(8)/3 ||
+		snapshot.Dataplane.TUNWriteCalls != 5 || snapshot.Dataplane.TUNWritePackets != 5 ||
+		snapshot.Dataplane.TUNWritePacketsPerCall != 1 {
+		t.Fatalf("unexpected TUN batch snapshot: %+v", snapshot.Dataplane)
 	}
 	if !snapshot.Sessions.Active || snapshot.Sessions.Reconnects != 3 || snapshot.QUIC.Available {
 		t.Fatalf("unexpected session/QUIC snapshot: sessions=%+v quic=%+v", snapshot.Sessions, snapshot.QUIC)

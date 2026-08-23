@@ -14,26 +14,43 @@
 
 package cloudflaremesh
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
 
 const (
-	// tunHeadroom is the one byte of slack reserved at the front of every
-	// buffer. It is exactly the length of the CONNECT-IP context ID varint,
-	// which lets WritePacketBuffer prepend the header in place instead of
-	// composing a fresh datagram, so the packet payload is never copied.
-	tunHeadroom = 1
+	// tunHeadroom reserves the one-byte CONNECT-IP context ID plus the largest
+	// possible eight-byte HTTP/3 quarter stream ID. Both layers prepend their
+	// framing into this slack, so neither allocates or copies the IP payload.
+	// Only the bytes actually used for the stream ID are sent.
+	tunHeadroom = 1 + 8
 
 	// outboundQueueDepth is how many read packets may wait for the MASQUE
 	// writer. It absorbs a stalled QUIC send without dropping traffic, and
 	// bounds how far the TUN reader can run ahead.
 	outboundQueueDepth = 256
 
-	// tunBufferPoolSize must exceed outboundQueueDepth, otherwise the reader
-	// could own the last free buffer while the queue holds all the others and
-	// the writer is between sessions. The surplus covers the buffer in the
-	// reader plus the one the writer is currently sending.
-	tunBufferPoolSize = outboundQueueDepth + 32
+	// tunWriteOffset is the Linux virtio-net header space required by
+	// wireguard/tun when CreateTUN enables IFF_VNET_HDR. CONNECT-IP's receive
+	// API returns a zero-copy packet without that headroom, so each receive
+	// pump copies into one reusable scratch buffer. This keeps singleton writes
+	// allocation-free; batching them would extend the lifetime of HTTP/3's
+	// receive buffer and require additional packet copies.
+	tunWriteOffset = 10
 )
+
+// tunBufferPoolSizeForBatch leaves one complete Device.Read batch outside the
+// outbound queue, plus slack for the MASQUE writer and shutdown handoff. If the
+// batch weren't included, a full outbound queue could starve the next batch
+// acquisition before the writer is able to return a buffer.
+func tunBufferPoolSizeForBatch(batchSize int) int {
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	return outboundQueueDepth + batchSize + 32
+}
 
 // tunBufferPool is a bounded freelist of TUN read buffers.
 //
@@ -124,5 +141,110 @@ func enqueueOutbound(ctx context.Context, outbound chan<- []byte, buf []byte, st
 		return true
 	case <-ctx.Done():
 		return false
+	}
+}
+
+// tunBatchReader is the narrow part of tun.Device used by the egress pump. It
+// keeps the ownership and cancellation behavior independently testable without
+// requiring a privileged Linux TUN device.
+type tunBatchReader interface {
+	Read(bufs [][]byte, sizes []int, offset int) (int, error)
+}
+
+type tunBatchWriter interface {
+	Write(bufs [][]byte, offset int) (int, error)
+}
+
+type tunPacketWriter struct {
+	device  tunBatchWriter
+	bufs    [][]byte
+	scratch []byte
+	stats   *transportStats
+}
+
+func newTUNPacketWriter(device tunBatchWriter, mtu int, stats *transportStats) *tunPacketWriter {
+	scratch := make([]byte, tunWriteOffset+mtu)
+	return &tunPacketWriter{device: device, bufs: [][]byte{scratch}, scratch: scratch, stats: stats}
+}
+
+func (w *tunPacketWriter) write(packet []byte) error {
+	if len(packet) > len(w.scratch)-tunWriteOffset {
+		return fmt.Errorf("TUN write packet length %d exceeds MTU buffer %d", len(packet), len(w.scratch)-tunWriteOffset)
+	}
+	copy(w.scratch[tunWriteOffset:], packet)
+	w.bufs[0] = w.scratch[:tunWriteOffset+len(packet)]
+	if w.stats != nil {
+		w.stats.tunWriteCalls.Add(1)
+	}
+	_, err := w.device.Write(w.bufs, tunWriteOffset)
+	if err == nil && w.stats != nil {
+		w.stats.tunWritePackets.Add(1)
+	}
+	return err
+}
+
+// pumpTUNToOutbound moves ownership of every successfully read buffer to the
+// outbound queue. All buffers that weren't returned as packets, and every
+// buffer on an error/cancellation path, are returned to the bounded pool.
+func pumpTUNToOutbound(ctx context.Context, reader tunBatchReader, batchSize int, pool *tunBufferPool, outbound chan<- []byte, stats *transportStats) error {
+	if batchSize < 1 {
+		return errors.New("TUN batch size must be positive")
+	}
+	bufs := make([][]byte, batchSize)
+	sizes := make([]int, batchSize)
+	for {
+		acquired := 0
+		for acquired < batchSize {
+			buf, ok := pool.get(ctx)
+			if !ok {
+				for i := 0; i < acquired; i++ {
+					pool.put(bufs[i])
+				}
+				return context.Cause(ctx)
+			}
+			bufs[acquired] = buf
+			sizes[acquired] = 0
+			acquired++
+		}
+
+		if stats != nil {
+			stats.tunReadCalls.Add(1)
+		}
+		n, err := reader.Read(bufs, sizes, tunHeadroom)
+		if err != nil {
+			for i := range bufs {
+				pool.put(bufs[i])
+			}
+			return err
+		}
+		if n < 1 || n > batchSize {
+			for i := range bufs {
+				pool.put(bufs[i])
+			}
+			return fmt.Errorf("TUN read returned invalid packet count %d for batch size %d", n, batchSize)
+		}
+		for i := n; i < batchSize; i++ {
+			pool.put(bufs[i])
+		}
+		for i := 0; i < n; i++ {
+			if sizes[i] < 1 || sizes[i] > len(bufs[i])-tunHeadroom {
+				for j := 0; j < n; j++ {
+					pool.put(bufs[j])
+				}
+				return fmt.Errorf("TUN read returned invalid packet size %d at batch index %d", sizes[i], i)
+			}
+		}
+		if stats != nil {
+			stats.tunReadPackets.Add(uint64(n))
+		}
+		for i := 0; i < n; i++ {
+			packet := bufs[i][:tunHeadroom+sizes[i]]
+			if !enqueueOutbound(ctx, outbound, packet, stats) {
+				for j := i; j < n; j++ {
+					pool.put(bufs[j])
+				}
+				return context.Cause(ctx)
+			}
+		}
 	}
 }

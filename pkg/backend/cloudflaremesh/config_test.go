@@ -31,9 +31,10 @@ func quicMaxDatagramPayload(packetSize int) int {
 
 func TestQUICInitialPacketSizeCarriesAFullMTUPacket(t *testing.T) {
 	for _, mtu := range []int{1280, 1300, 1400, 1407} {
-		// The datagram is the IP packet plus the CONNECT-IP context ID and the
-		// HTTP/3 quarter-stream ID.
-		datagram := mtu + tunHeadroom + 1
+		// This transport opens one CONNECT request on the first client-initiated
+		// bidirectional stream, so its quarter stream ID and the CONNECT-IP
+		// context ID are one byte each. The unused reserved headroom isn't sent.
+		datagram := mtu + 1 + 1
 		if got := quicMaxDatagramPayload(int(quicInitialPacketSize(mtu))); got < datagram {
 			t.Errorf("MTU %d: a session starts at %d bytes, which carries a %d byte datagram, but a full packet needs %d",
 				mtu, quicInitialPacketSize(mtu), got, datagram)

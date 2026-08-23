@@ -41,8 +41,9 @@ const (
 // quicDatagramOverhead is how much larger a QUIC packet is than the IP packet
 // it carries, on the CONNECT-IP-over-HTTP/3 path:
 //
-//	 1  CONNECT-IP context ID varint (tunHeadroom)
-//	 4  HTTP/3 quarter-stream-ID varint (1 in practice, rounded up for slack)
+//	 1  CONNECT-IP context ID varint
+//	 4  HTTP/3 quarter-stream-ID varint (1 for this first request stream, plus
+//	    conservative slack; the TUN buffer reserves the full 8-byte maximum)
 //	 3  DATAGRAM frame type plus its length varint
 //	37  what quic-go conservatively reserves for the short header and the AEAD
 //	    tag when it decides whether a datagram fits (1 type + 20 connection ID
