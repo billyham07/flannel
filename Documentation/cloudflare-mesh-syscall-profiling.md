@@ -86,6 +86,7 @@ could not predict. The test sent 120 Mbit/s of 1252-byte UDP payloads for 60 sec
 | digest-pinned baseline, median of 3 | 116.41 Mbit/s | 2.95% | 33.81 s in a measured run |
 | unrestricted equal-size GSO, median of 2 | 92.84 Mbit/s | 22.60% | 19.89 s |
 | GSO capped at 4 segments, median of 3 | 106.02 Mbit/s | 11.63% | 22.04 s |
+| final candidate, GSO disabled, median of 3 | 116.54 Mbit/s | 2.84% | 35.55 s |
 
 The capped fork did reduce CPU by about 35%, and its live counters showed an average of
 3.44 segments per GSO write. However, it still reduced delivered throughput by about 9%
@@ -98,6 +99,11 @@ The environment-specific Helm values set `QUIC_GO_DISABLE_GSO=true`. GSO is reta
 an explicit experiment, with the four-segment safety cap and counters, but is not the
 production default. Removing that environment variable requires a path-specific gray test;
 CPU improvement alone is not a promotion criterion.
+
+With GSO disabled, the final candidate restored baseline throughput and loss. Its measured
+CPU cost was about 5% above the single baseline CPU window, which is the current cost of
+the always-on atomic transport counters; this is accepted for the gray deployment but is
+not a CPU optimization claim.
 
 ## The MTU and the QUIC packet size were unrelated numbers
 
