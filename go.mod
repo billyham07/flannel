@@ -7,7 +7,7 @@ go 1.25.9
 // Keep the v0.60.0 API while batching equal-sized short QUIC packets with UDP
 // GSO, exposing receive queue counters, and composing HTTP/3 DATAGRAM framing
 // in caller-provided headroom.
-replace github.com/quic-go/quic-go => github.com/billyham07/quic-go v0.60.1-0.20260823161721-ab8a746bdc77
+replace github.com/quic-go/quic-go => github.com/billyham07/quic-go v0.60.1-0.20260823165236-0638d5f720a6
 
 // Forward caller headroom from CONNECT-IP to quic-go's optional buffered
 // DATAGRAM API. Older HTTP/3 implementations continue to use SendDatagram.
