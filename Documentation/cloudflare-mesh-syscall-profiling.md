@@ -75,6 +75,30 @@ single-packet path. The fork also counts successful GSO writes and segments, so
 Padding datagrams to `maxPacketSize` in flannel remains invalid: QUIC packet-number length
 changes underneath the application, so the target wire size moves.
 
+### Gray result: keep GSO opt-in
+
+The old single-node cluster exposed a downstream tradeoff that the syscall profile alone
+could not predict. The test sent 120 Mbit/s of 1252-byte UDP payloads for 60 seconds from
+`100.96.0.23` to `100.96.0.38`, at MTU 1280. Receiver results and flanneld CPU are:
+
+| sender | receiver throughput | receiver loss | flanneld CPU |
+| --- | ---: | ---: | ---: |
+| digest-pinned baseline, median of 3 | 116.41 Mbit/s | 2.95% | 33.81 s in a measured run |
+| unrestricted equal-size GSO, median of 2 | 92.84 Mbit/s | 22.60% | 19.89 s |
+| GSO capped at 4 segments, median of 3 | 106.02 Mbit/s | 11.63% | 22.04 s |
+
+The capped fork did reduce CPU by about 35%, and its live counters showed an average of
+3.44 segments per GSO write. However, it still reduced delivered throughput by about 9%
+and added about 8.7 percentage points of receiver loss. Application, QUIC receive, and
+HTTP/3 receive queues recorded no drops, buffer-pool exhaustion remained zero, and QUIC
+reported only the two packets lost during startup. The evidence therefore points to the
+on-wire burst interacting badly with this public path rather than a userspace queue limit.
+
+The environment-specific Helm values set `QUIC_GO_DISABLE_GSO=true`. GSO is retained as
+an explicit experiment, with the four-segment safety cap and counters, but is not the
+production default. Removing that environment variable requires a path-specific gray test;
+CPU improvement alone is not a promotion criterion.
+
 ## The MTU and the QUIC packet size were unrelated numbers
 
 Chasing the size arithmetic above turned up a defect rather than an optimisation.
