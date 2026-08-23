@@ -6,7 +6,7 @@ go 1.25.9
 
 // Keep the v0.60.0 API while batching equal-sized short QUIC packets with UDP
 // GSO and exposing the bounded QUIC / HTTP/3 DATAGRAM receive queue counters.
-replace github.com/quic-go/quic-go => github.com/billyham07/quic-go v0.60.1-0.20260823122849-6b20800a6fcf
+replace github.com/quic-go/quic-go => github.com/billyham07/quic-go v0.60.1-0.20260823130733-e77cddc154bd
 
 require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33
