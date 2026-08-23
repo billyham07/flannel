@@ -207,10 +207,13 @@ func pumpTUNToOutbound(ctx context.Context, reader tunBatchReader, batchSize int
 			acquired++
 		}
 
+		n, err := reader.Read(bufs, sizes, tunHeadroom)
+		// Count completed calls. A blocked Read is merely the current waiter,
+		// not an empty batch; counting it early makes the live ratio dip below
+		// one packet per call while traffic is idle.
 		if stats != nil {
 			stats.tunReadCalls.Add(1)
 		}
-		n, err := reader.Read(bufs, sizes, tunHeadroom)
 		if err != nil {
 			for i := range bufs {
 				pool.put(bufs[i])
