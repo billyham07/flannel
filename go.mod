@@ -4,6 +4,10 @@ go 1.25.9
 
 // replace github.com/dgrijalva/jwt-go => github.com/golang-jwt/jwt/v4 v4.2.0
 
+// Keep the v0.60.0 API while batching equal-sized short QUIC packets with UDP
+// GSO and exposing the bounded QUIC / HTTP/3 DATAGRAM receive queue counters.
+replace github.com/quic-go/quic-go => github.com/billyham07/quic-go v0.60.1-0.20260823122849-6b20800a6fcf
+
 require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33
 	github.com/Microsoft/hcsshim v0.14.1

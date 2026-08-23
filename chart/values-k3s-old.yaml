@@ -8,8 +8,14 @@ flannel:
   backend: "cloudflare-mesh"
   image:
     repository: docker.io/sgabpw/flannel-cloudflare-mesh
-    tag: mesh-gcpace-20260815
-    digest: ""
+    # Keep the human-readable tag in sync with the digest-pinned image below.
+    tag: mesh-mtu-20260818
+    digest: sha256:ba844bf5f3cd866584b3c77e3866d9889bd5669ef25903de4318a52509a97819
+  # The pod uses host networking. Loopback keeps pprof and mesh transport
+  # counters node-local while still allowing kubectl debug / nsenter access.
+  extraEnv:
+    - name: CLOUDFLARE_MESH_PPROF_ADDR
+      value: "127.0.0.1:6060"
 
 cloudflareMesh:
   enabled: true

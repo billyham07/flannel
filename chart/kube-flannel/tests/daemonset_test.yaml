@@ -12,6 +12,11 @@ tests:
           path: metadata.name
           value: kube-flannel-ds
 
+  - it: should roll flanneld when the rendered config changes
+    asserts:
+      - exists:
+          path: spec.template.metadata.annotations["checksum/config"]
+
   - it: should have the correct image
     set:
       flannel.image.repository: cicker.io/flannel/flannel
