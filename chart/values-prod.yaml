@@ -9,8 +9,8 @@ flannel:
   image:
     repository: docker.io/sgabpw/flannel-cloudflare-mesh
     # Keep the human-readable tag in sync with the digest-pinned image below.
-    tag: mesh-p3-tunbatch-zcopy-r2-20260824
-    digest: sha256:42566c7249ceb3ee82ea1e9df74225458c73a511946ad4f832b7e474475c2def
+    tag: mesh-p3-tunbatch-zcopy-r3-20260824
+    digest: sha256:b05c8511a615b7f177a33597931376d16a646d2977086d069f946af818118915
   # The pod uses host networking. Loopback keeps pprof and mesh transport
   # counters node-local while still allowing kubectl debug / nsenter access.
   extraEnv:
