@@ -1,138 +1,137 @@
-# flannel
+# Flannel with Native Cloudflare Mesh Backend 🌐
 
-![flannel Logo](logos/flannel-horizontal-color.png)
+[![Go Report Card](https://goreportcard.com/badge/github.com/billyham07/flannel)](https://goreportcard.com/report/github.com/billyham07/flannel)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Backend](https://img.shields.io/badge/Backend-Cloudflare%20Mesh%20(MASQUE)-F38020?logo=cloudflare&logoColor=white)](https://www.cloudflare.com/products/zero-trust/)
 
-![Build Status](https://github.com/flannel-io/flannel/actions/workflows/build.yaml/badge.svg?branch=master)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/flannel-io/flannel/badge)](https://scorecard.dev/viewer/?uri=github.com%2Fflannel-io%2Fflannel)
+A specialized, high-performance distribution of **Flannel** featuring a **native, pure-Go Cloudflare Zero Trust Mesh backend**.
 
-Flannel is a simple and easy way to configure a layer 3 network fabric designed for Kubernetes.
+Designed for hybrid-cloud, edge-to-cloud, and multi-region Kubernetes clusters, it establishes high-throughput pod-to-pod overlays traversing Cloudflare's global Anycast edge via **MASQUE (RFC 9484: CONNECT-IP over HTTP/3 / QUIC)** — with **zero external daemons (no `warp-cli` required)**.
 
-## How it works
+---
 
-Flannel runs a small, single binary agent called `flanneld` on each host, and is responsible for allocating a subnet lease to each host out of a larger, preconfigured address space.
-Flannel uses either the Kubernetes API or [etcd][etcd] directly to store the network configuration, the allocated subnets, and any auxiliary data (such as the host's public IP).
-Packets are forwarded using one of several [backend mechanisms][backends] including VXLAN and various cloud integrations.
+## 🚀 Key Highlights & Innovations
 
-### Networking details
+* **Pure-Go Native MASQUE Dataplane**: Complete userspace implementation of CONNECT-IP over HTTP/3. Pod traffic flows directly through Linux TUN into embedded QUIC sessions without running heavy external WARP/WireGuard daemons.
+* **Kubernetes Native Operator**: Automated node lifecycle, device provisioning, key rotation, and automated GC reclamation of orphaned Cloudflare Zero Trust device seats.
+* **Production-Grade Syscall & Memory Optimizations**:
+  * **Bounded TUN Buffer Recycling**: Zero-allocation hot path with reusable slice buffers, reducing GC cycles by ~36%.
+  * **Dynamic MTU & QUIC Packet Sizing**: Eliminates the MTU mismatch black-hole defect by dynamically deriving initial QUIC packet buffers from the configured TUN MTU.
+  * **Equal-Size UDP GSO Batching**: Custom `quic-go` patch supporting `UDP_SEGMENT` GSO batching for CONNECT-IP datagrams, slashing send-side syscall overhead.
+  * **HTTP/3 Burst Absorption**: Extended buffering queues prevent silent datagram drops during packet bursts.
+* **Deep Diagnostics & Telemetry**: Built-in `/debug/cloudflare-mesh/stats` endpoint exposing real-time RTT, QUIC loss, HTTP/3 datagram queue watermarks, and GSO efficiency counters.
 
-Platforms like Kubernetes assume that each container (pod) has a unique, routable IP inside the cluster.
-The advantage of this model is that it removes the port mapping complexities that come from sharing a single host IP.
+---
 
-Flannel is responsible for providing a layer 3 IPv4 network between multiple nodes in a cluster. Flannel does not control how containers are networked to the host, only how the traffic is transported between hosts. However, flannel does provide a CNI plugin for Kubernetes and a guidance on integrating with Docker.
+## 🏗️ Architecture
 
-Flannel is focused on networking. While the `flanneld` binary does not natively enforce Network Policies, the Flannel project provides ways to add policy support to your cluster.
-
-### Network Policy
-
-For Network Policy enforcement, options include:
-
-* **Integrated controller:** The [Flannel Helm chart](https://github.com/flannel-io/flannel/tree/master/chart/kube-flannel) has a `netpol.enabled` option that deploys the [Kubernetes SIGs network policy controller](https://github.com/kubernetes-sigs/kube-network-policies) alongside Flannel.
-* **Third-party controllers:** Use Flannel for connectivity and another project for policy, for example [Calico](https://docs.tigera.io/calico/latest/getting-started/kubernetes/flannel/install-for-flannel) or CNI chaining with [Cilium](https://docs.cilium.io/en/stable/installation/cni-chaining/).
-
-See [Documentation/netpol.md](Documentation/netpol.md) for configuration details.
-
-## Getting started on Kubernetes
-
-The easiest way to deploy flannel with Kubernetes is to use one of several deployment tools and distributions that network clusters with flannel by default. For example, [K3s][k3s] sets up flannel in the Kubernetes clusters it creates using the open source [K3s Installer][k3s-installer] to drive the setup process.
-
-Though not required, it's recommended that flannel uses the Kubernetes API as its backing store which avoids the need to deploy a discrete `etcd` cluster for `flannel`. This `flannel` mode is known as the *kube subnet manager*.
-
-### Deploying flannel manually
-
-Flannel can be added to any existing Kubernetes cluster though it's simplest to add `flannel` before any pods using the pod network have been started.
-
-For Kubernetes v1.17+
-
-#### Deploying Flannel with kubectl
-
-```bash
-kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+```
++-------------------------------------------------------------------------------+
+|                             Kubernetes Node                                   |
+|                                                                               |
+|  +-------------+       +-------------------+       +-----------------------+  |
+|  | Pod Network | ----> |   flannel.mesh    | ----> |  pkg/backend/         |  |
+|  | (10.244/16) |       |  (TUN Device)     |       |  cloudflaremesh       |  |
+|  +-------------+       +-------------------+       +-----------+-----------+  |
+|                                                                |              |
+|                                                     [CONNECT-IP / HTTP3 / QUIC]
+|                                                                |              |
++----------------------------------------------------------------|--------------+
+                                                                 | UDP / 443
+                                                                 v
+                                            +-----------------------------------+
+                                            |   Cloudflare Global Anycast Edge  |
+                                            |       (Zero Trust Mesh IP)        |
+                                            +-----------------------------------+
 ```
 
-If you use custom `podCIDR` (not `10.244.0.0/16`) you first need to download the above manifest and modify the network to match your one.
+---
 
-#### Deploying Flannel with Helm
+## 📊 Performance & Syscall Benchmarks
 
-```bash
-# Needs manual creation of namespace to avoid Helm error
-kubectl create ns kube-flannel
-kubectl label --overwrite ns kube-flannel pod-security.kubernetes.io/enforce=privileged
+Tested on a 5-node distributed Kubernetes cluster across **Hong Kong, Japan, and Sydney** (see detailed profiling notes in [`Documentation/cloudflare-mesh-syscall-profiling.md`](Documentation/cloudflare-mesh-syscall-profiling.md)):
 
-helm repo add flannel https://flannel-io.github.io/flannel/
-helm install flannel --set podCidr="10.244.0.0/16" --namespace kube-flannel flannel/flannel
+* **Multi-Node Fan-out Throughput**: **434 Mbit/s** across 3 concurrent multi-region peer nodes through a **single flanneld instance** and single MASQUE session.
+* **GC Pressure Reduction**: Dropped GC invocation frequency from **20.9/s to 13.3/s** under sustained line-rate traffic.
+* **Zero Packet Drop**: Eliminated silent drops on full-MTU packet ingress during QUIC path discovery.
+
+---
+
+## ⚙️ Configuration
+
+Set the backend to `cloudflare-mesh` in your Flannel `net-conf.json`:
+
+```json
+{
+  "Network": "10.244.0.0/16",
+  "Backend": {
+    "Type": "cloudflare-mesh",
+    "InterfaceName": "flannel.mesh",
+    "MeshCIDR": "100.96.0.0/12",
+    "MTU": 1280,
+    "RouteTable": 51820,
+    "ConnectTimeout": "45s",
+    "KeepalivePeriod": "30s",
+    "ReconcilePeriod": "30s"
+  }
+}
 ```
 
-See [Kubernetes](Documentation/kubernetes.md) for more details.
+### Configuration Parameters
 
-In case a firewall is configured ensure to enable the right port used by the configured [backend][backends].
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `Type` | string | - | Must be set to `cloudflare-mesh` |
+| `InterfaceName` | string | `flannel.mesh` | Name of the local TUN device created on the host |
+| `MeshCIDR` | string | `100.96.0.0/12` | Cloudflare Zero Trust Mesh IP allocation pool |
+| `MTU` | int | `1280` | MTU for the overlay network interface |
+| `RouteTable` | int | `51820` | Policy routing table ID for pod mesh traffic |
+| `KeepalivePeriod` | string | `30s` | Periodic session ping interval for MASQUE sessions |
 
-Flannel uses `portmap` as CNI network plugin by default; when deploying Flannel ensure that the [CNI Network plugins][Network-plugins] are installed in `/opt/cni/bin` the latest binaries can be downloaded with the following commands:
+---
+
+## 📦 Deployment via Helm
 
 ```bash
-ARCH=$(uname -m)
-  case $ARCH in
-    armv7*) ARCH="arm";;
-    aarch64) ARCH="arm64";;
-    x86_64) ARCH="amd64";;
-  esac
-mkdir -p /opt/cni/bin
-curl -O -L https://github.com/containernetworking/plugins/releases/download/v1.7.1/cni-plugins-linux-$ARCH-v1.7.1.tgz
-tar -C /opt/cni/bin -xzf cni-plugins-linux-$ARCH-v1.7.1.tgz
+# 1. Install the Cloudflare Mesh CRD and Operator
+helm install cloudflare-mesh-operator ./chart/kube-flannel \
+  --namespace kube-flannel \
+  --create-namespace \
+  --set cloudflareMesh.enabled=true \
+  --set cloudflareMesh.apiToken="<CLOUDFLARE_API_TOKEN>" \
+  --set cloudflareMesh.accountID="<CLOUDFLARE_ACCOUNT_ID>"
+
+# 2. Verify mesh connectivity and node registration
+kubectl -n kube-flannel get nodes -o wide
 ```
 
-Flannel requires the br_netfilter module to start and from version 1.30 kubeadm doesn't check if the module is installed and Flannel will not rightly start in case the module is missing.
+---
 
-## Getting started on Docker
+## 🔍 Observability & Live Stats
 
-flannel is also widely used outside of Kubernetes. When deployed outside of Kubernetes, etcd is always used as the datastore. For more details integrating flannel with Docker see [Running](Documentation/running.md)
+When loopback diagnostics are enabled, querying `http://127.0.0.1:6060/debug/cloudflare-mesh/stats` outputs live transport health metrics:
 
-## Documentation
+```json
+{
+  "quic_rtt_ms": 14.2,
+  "quic_loss_count": 0,
+  "http3_datagram_drops": 0,
+  "tun_buffer_pool_exhaustion": 0,
+  "gso_segments_per_batch": 3.44,
+  "active_masque_sessions": 1
+}
+```
 
-- [Building (and releasing)](Documentation/building.md)
-- [Configuration](Documentation/configuration.md)
-- [Backends](Documentation/backends.md)
-- [Running](Documentation/running.md)
-- [Troubleshooting](Documentation/troubleshooting.md)
-- [Projects integrating with flannel](Documentation/integrations.md)
-- [Organizations using flannel in production](ADOPTERS.md)
+---
 
-## Contact
+## 🔗 Related Upstream & Fork Ecosystem
 
-- Slack:
-  - #k3s on [Rancher Users Slack](https://slack.rancher.io)
-  - #flannel-users on [Calico Users Slack](https://slack.projectcalico.org)
-- Planning/Roadmap: [ROADMAP.md][roadmap], [milestones][milestones]
-- Bugs: [issues][flannel-issues]
+This project relies on optimized low-level transport forks:
+* **[`billyham07/quic-go`](https://github.com/billyham07/quic-go)**: Patched with equal-size GSO segment coalescing and transport drops observability.
+* **[`billyham07/connect-ip-go`](https://github.com/billyham07/connect-ip-go)**: Tailored for Cloudflare Zero Trust MASQUE framing compatibility.
 
-## Community Meeting
+---
 
-The Flannel Maintainer Community runs a meeting on the third Thursday of each month at 8:30 AM PST (16:30 UTC). This meeting is used to discuss issues, open pull requests, and other topics related to Flannel should the need arise.
+## Standard Flannel Features
 
-The meeting agenda and Teams link can be found here: [Flannel Community Meeting Agenda](https://docs.google.com/document/d/1kPMMFDhljWL8_CUZajrfL8Q9sdntd9vvUpe-UGhX5z8)
-
-## Contributing
-
-See [CONTRIBUTING][contributing] for details on submitting patches and the contribution workflow.
-
-## Reporting bugs & security vulnerabilities
-
-See [reporting bugs][reporting] for details about reporting any issues.
-
-For security issues, please first check our [security policy](SECURITY.md).
-
-## Licensing
-
-Flannel is under the Apache 2.0 license. See the [LICENSE][license] file for details.
-
-[calico]: http://www.projectcalico.org
-[etcd]: https://go.etcd.io/etcd/v3
-[contributing]: CONTRIBUTING.md
-[license]: https://github.com/flannel-io/flannel/blob/master/LICENSE
-[milestones]: https://github.com/flannel-io/flannel/milestones
-[flannel-issues]: https://github.com/flannel-io/flannel/issues
-[backends]: Documentation/backends.md
-[roadmap]: ROADMAP.md
-[reporting]: Documentation/reporting_bugs.md
-[k3s-installer]: https://github.com/k3s-io/k3s/#quick-start---install-script
-[k3s]: https://k3s.io/
-[Network-plugins]: https://github.com/containernetworking/plugins
+All standard Flannel backend options (VXLAN, host-gw, WireGuard, etc.) remain supported. For upstream documentation, see the [official Flannel docs](https://github.com/flannel-io/flannel).
