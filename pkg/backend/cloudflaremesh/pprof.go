@@ -15,6 +15,7 @@
 package cloudflaremesh
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -30,10 +31,10 @@ import (
 // without pprof the best available evidence is a GC trace, which says how much
 // garbage there is but not where it comes from.
 //
-// It is off unless the variable is set, and the listener carries the pprof
-// handlers only. Bind it to the loopback address unless the node's network is
-// trusted: profiles are not sensitive in themselves, but the endpoint is an
-// easy way to make a busy process busier.
+// It is off unless the variable is set. Besides pprof, the listener exposes a
+// cheap JSON counter snapshot at /debug/cloudflare-mesh/stats. Bind it to the
+// loopback address: profiles can retain process data and profiling a busy
+// dataplane also consumes CPU.
 const pprofAddrEnv = "CLOUDFLARE_MESH_PPROF_ADDR"
 
 var pprofOnce sync.Once
@@ -50,6 +51,7 @@ func startPprofIfRequested() {
 		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		mux.HandleFunc("/debug/cloudflare-mesh/stats", cloudflareMeshStatsHandler)
 
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -66,4 +68,15 @@ func startPprofIfRequested() {
 			}
 		}()
 	})
+}
+
+func cloudflareMeshStatsHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	stats := activeTransportStats.Load()
+	if stats == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "cloudflare-mesh transport is not active"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(stats.snapshot())
 }

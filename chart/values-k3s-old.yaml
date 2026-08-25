@@ -8,8 +8,18 @@ flannel:
   backend: "cloudflare-mesh"
   image:
     repository: docker.io/sgabpw/flannel-cloudflare-mesh
-    tag: mesh-gcpace-20260815
-    digest: ""
+    # Keep the human-readable tag in sync with the digest-pinned image below.
+    tag: mesh-p3-h3-zcopy-r4-20260824
+    digest: sha256:ee88f5d08102ebfe7615395ad2b02bbef29a9850ba477722333dcefb64d74792
+  # The pod uses host networking. Loopback keeps pprof and mesh transport
+  # counters node-local while still allowing kubectl debug / nsenter access.
+  extraEnv:
+    - name: CLOUDFLARE_MESH_PPROF_ADDR
+      value: "127.0.0.1:6060"
+    # UDP GSO reduced CPU in gray testing, but increased loss on this public
+    # path. Keep it opt-in until the path policer / pacing interaction is fixed.
+    - name: QUIC_GO_DISABLE_GSO
+      value: "true"
 
 cloudflareMesh:
   enabled: true

@@ -23,10 +23,10 @@ The CPU profile after the buffer-pool change is dominated by syscall cost:
 
 A differential allocation profile shows no flat allocation in `pkg/backend/cloudflaremesh`; most remaining allocation is quic-go taking ownership of datagrams.
 
-## Is UDP GSO batching our packets?
+## Why the baseline did not batch with UDP GSO
 
-No, and it cannot, so this does not need to be measured. It is a structural property of
-how quic-go v0.60.0 packs and sends QUIC DATAGRAM frames.
+The upstream quic-go v0.60.0 path could not batch CONNECT-IP packets. This was a
+structural property of how it packed and sent QUIC DATAGRAM frames.
 
 - `packet_packer.go:654` takes **at most one** DATAGRAM frame per QUIC packet. It peeks
   the datagram queue once; there is no loop that fills the remaining payload.
@@ -65,12 +65,45 @@ at all. The host's `Udp: OutDatagrams` counter agrees: 477,475 sends against ~48
 packets over a separate 30 second run. `recvmmsg` doing the receive side in 39,571 calls is
 the contrast.
 
-Getting batching would need a change in quic-go: coalesce consecutive packets of *equal*
-size rather than only full-size ones. `UDP_SEGMENT` allows that -- it only requires every
-segment but the last to be the same length -- and it would benefit every
-DATAGRAM-carrying application, not just this backend. Padding our datagrams up to
-`maxPacketSize` from this side is not a workaround: the packet number length changes
-underneath us, so the target moves.
+The pinned quic-go fork now coalesces consecutive packets of *equal* wire size rather
+than only full-size packets. Each batch locks onto its first data-sized packet, constrains
+later packets to that size, preserves ECN boundaries, and permits only the last segment to
+be shorter, as required by `UDP_SEGMENT`. Tiny ACK-only packets stay on the original
+single-packet path. The fork also counts successful GSO writes and segments, so
+`gso_segments / gso_batches` measures the result without wrapping `*net.UDPConn`.
+
+Padding datagrams to `maxPacketSize` in flannel remains invalid: QUIC packet-number length
+changes underneath the application, so the target wire size moves.
+
+### Gray result: keep GSO opt-in
+
+The old single-node cluster exposed a downstream tradeoff that the syscall profile alone
+could not predict. The test sent 120 Mbit/s of 1252-byte UDP payloads for 60 seconds from
+`100.96.0.23` to `100.96.0.38`, at MTU 1280. Receiver results and flanneld CPU are:
+
+| sender | receiver throughput | receiver loss | flanneld CPU |
+| --- | ---: | ---: | ---: |
+| digest-pinned baseline, median of 3 | 116.41 Mbit/s | 2.95% | 33.81 s in a measured run |
+| unrestricted equal-size GSO, median of 2 | 92.84 Mbit/s | 22.60% | 19.89 s |
+| GSO capped at 4 segments, median of 3 | 106.02 Mbit/s | 11.63% | 22.04 s |
+| final candidate, GSO disabled, median of 3 | 116.54 Mbit/s | 2.84% | 35.55 s |
+
+The capped fork did reduce CPU by about 35%, and its live counters showed an average of
+3.44 segments per GSO write. However, it still reduced delivered throughput by about 9%
+and added about 8.7 percentage points of receiver loss. Application, QUIC receive, and
+HTTP/3 receive queues recorded no drops, buffer-pool exhaustion remained zero, and QUIC
+reported only the two packets lost during startup. The evidence therefore points to the
+on-wire burst interacting badly with this public path rather than a userspace queue limit.
+
+The environment-specific Helm values set `QUIC_GO_DISABLE_GSO=true`. GSO is retained as
+an explicit experiment, with the four-segment safety cap and counters, but is not the
+production default. Removing that environment variable requires a path-specific gray test;
+CPU improvement alone is not a promotion criterion.
+
+With GSO disabled, the final candidate restored baseline throughput and loss. Its measured
+CPU cost was about 5% above the single baseline CPU window, which is the current cost of
+the always-on atomic transport counters; this is accepted for the gray deployment but is
+not a CPU optimization claim.
 
 ## The MTU and the QUIC packet size were unrelated numbers
 
@@ -123,26 +156,33 @@ CPU is still worth buying. At 434 Mbit/s flanneld cost 118% of one core, on a no
 two cores in total -- roughly a quarter of a core per 100 Mbit/s. On small nodes that is the
 real constraint, and it is what the `sendmsg`-per-packet result above translates into.
 
-## Still unmeasured
+## Receive-queue pressure is now measurable
 
-Whether the QUIC DATAGRAM receive queue is dropping. quic-go caps it at 128
-(`datagram_queue.go:16`) and discards silently beyond that. Our reader consumes it with a
-blocking TUN write, so a slow TUN turns directly into drops that the inner TCP sees as
-loss. Worth correlating receive-queue drops and high-water mark against inner TCP
-retransmits, which ran at 732 for a 30 second single stream and 2,277 for eight.
+There are two bounded receive queues, not one: quic-go first buffers 128 QUIC DATAGRAMs,
+then HTTP/3 buffers only 32 datagrams per request stream. Both previously discarded
+silently when full, so the HTTP/3 queue could hide loss before the QUIC queue reached its
+limit. The pinned fork exposes cumulative drop, high-water, and capacity values for both
+layers. flannel publishes them together with application queue pressure, RTT, QUIC loss,
+and session counters at `http://127.0.0.1:6060/debug/cloudflare-mesh/stats` when the
+loopback diagnostics listener is enabled.
+
+Correlate these counters against inner TCP retransmits and UDP loss. A drop counter of
+zero is meaningful only while `internal_drops.available` is true; between sessions the
+fields are `null` rather than fabricated zeroes.
 
 ## Where the remaining syscalls are
 
 Ranked, for whenever CPU per Mbit/s becomes worth reducing:
 
-1. `sendmsg`, 35.9%, one per packet -- needs the quic-go GSO change above.
+1. `sendmsg`, 35.9% in the baseline -- the equal-size GSO fork targets this cost. Confirm
+   its live reduction with `gso_segments_per_batch`, `strace -c`, and CPU seconds/GB.
 2. TUN read and write, ~10% plus part of the read cost -- needs `IFF_VNET_HDR` with
    TSO/GRO so the kernel hands over 64 KB segments instead of one packet per syscall.
    `songgao/water` cannot do this; `golang.zx2c4.com/wireguard/tun` can, and its batched
    `Read`/`Write` API is the shape this dataplane already has.
 
-Both are large changes, and neither raises throughput: they lower the quarter-core per
-100 Mbit/s. Do them when node CPU is the complaint, not when throughput is.
+Both target CPU per Mbit/s rather than the Cloudflare per-peer throughput ceiling. The GSO
+change is implemented here; TUN offload remains a later, substantially larger change.
 
 ## Guardrails
 
@@ -151,5 +191,5 @@ relies on the concrete UDP connection to enable Linux UDP fast paths such as GSO
 the connection type would contaminate the benchmark.
 
 Do not change TUN queueing, checksum behavior, congestion control, or MASQUE framing while
-measuring. The MTU-to-packet-size fix above is deliberately the only dataplane-visible
-change, so the next benchmark measures it and nothing else.
+measuring. Compare the new candidate at MTU 1280 against the digest-pinned baseline first;
+only then run the separate 1350/1400 MTU experiment.

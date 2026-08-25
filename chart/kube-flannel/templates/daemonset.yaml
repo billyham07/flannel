@@ -12,6 +12,10 @@ spec:
       app: flannel
   template:
     metadata:
+      annotations:
+        # flanneld reads net-conf.json only at startup. Roll the DaemonSet when
+        # the rendered ConfigMap changes so MTU and backend changes take effect.
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
       labels:
         tier: node
         app: flannel

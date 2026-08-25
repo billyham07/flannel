@@ -175,6 +175,7 @@ type nativeTransport struct {
 	cancel       context.CancelFunc
 	done         chan struct{}
 	closeOnce    sync.Once
+	stats        *transportStats
 }
 
 func startNativeTransport(ctx context.Context, cfg *runtimeConfig, connector *meshapi.ConnectorCredentials) (*nativeTransport, error) {
@@ -219,7 +220,9 @@ func startNativeTransport(ctx context.Context, cfg *runtimeConfig, connector *me
 	t := &nativeTransport{
 		iface: dev, registration: state, privateKey: key, cfg: cfg,
 		ready: make(chan struct{}), cancel: cancel, done: make(chan struct{}),
+		stats: &transportStats{},
 	}
+	activeTransportStats.Store(t.stats)
 	go t.run(sessionCtx)
 	timer := time.NewTimer(cfg.ConnectWait)
 	defer timer.Stop()
@@ -258,6 +261,7 @@ func (t *nativeTransport) Close() {
 		_ = t.iface.Close()
 	})
 	<-t.done
+	activeTransportStats.CompareAndSwap(t.stats, nil)
 }
 
 func loadOrEnroll(ctx context.Context, cfg *runtimeConfig, connector *meshapi.ConnectorCredentials) (meshRegistration, *ecdsa.PrivateKey, error) {
@@ -669,7 +673,7 @@ func (t *nativeTransport) run(ctx context.Context) {
 	defer t.iface.Close()
 	// Buffers are recycled rather than allocated per packet; see tunBufferPool
 	// for the ownership rules the reader and the writer pump both follow.
-	pool := newTUNBufferPool(tunBufferPoolSize, t.cfg.MTU)
+	pool := newTUNBufferPoolWithStats(tunBufferPoolSize, t.cfg.MTU, t.stats)
 	outbound := make(chan []byte, outboundQueueDepth)
 	go func() {
 		for {
@@ -683,29 +687,31 @@ func (t *nativeTransport) run(ctx context.Context) {
 				close(outbound)
 				return
 			}
-			select {
-			case outbound <- buf[:tunHeadroom+n]:
-			case <-ctx.Done():
+			t.stats.tunReadCalls.Add(1)
+			t.stats.tunReadPackets.Add(1)
+			if !enqueueOutbound(ctx, outbound, buf[:tunHeadroom+n], t.stats) {
 				pool.put(buf)
 				return
 			}
 		}
 	}()
-	delay := time.Second
+	backoff := reconnectBackoff{}
 	if err := t.reportDeviceState(ctx, "Connecting", "masque"); err != nil {
 		log.Warningf("cloudflare-mesh: initial device-state report failed: %v", err)
 	}
 	for ctx.Err() == nil {
-		started := time.Now()
-		err := t.runSession(ctx, outbound, pool)
+		connectedFor, err := t.runSession(ctx, outbound, pool)
 		if ctx.Err() != nil {
 			break
 		}
-		// A session that carried traffic for a while is evidence the endpoint
-		// is healthy, so the next blip should reconnect immediately rather
-		// than inherit the backoff a long-past outage left behind.
-		if time.Since(started) >= sessionHealthyAfter {
-			delay = time.Second
+		if err != nil && !isCleanRemoteClose(err) {
+			t.stats.sessionErrors.Add(1)
+		}
+		t.stats.reconnects.Add(1)
+		delay := backoff.nextDelay(connectedFor, err)
+		if delay == 0 {
+			log.Warningf("cloudflare-mesh: MASQUE session lost: %v; reconnecting immediately", err)
+			continue
 		}
 		log.Warningf("cloudflare-mesh: MASQUE session lost: %v; reconnecting in %s", err, delay)
 		timer := time.NewTimer(delay)
@@ -715,27 +721,58 @@ func (t *nativeTransport) run(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		if delay < 30*time.Second {
-			delay *= 2
-			if delay > 30*time.Second {
-				delay = 30 * time.Second
-			}
-		}
 	}
 }
 
-func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte, pool *tunBufferPool) error {
+type reconnectBackoff struct {
+	failures uint
+}
+
+func (b *reconnectBackoff) nextDelay(connectedDuration time.Duration, err error) time.Duration {
+	// A long-lived session, or an explicit peer NO_ERROR close, proves that
+	// the endpoint was usable. Its first replacement starts immediately. Only
+	// a failed replacement attempt enters the 1s, 2s, 4s ... delay sequence.
+	if connectedDuration >= sessionHealthyAfter || isCleanRemoteClose(err) {
+		b.failures = 0
+		return 0
+	}
+	delay := time.Second
+	for i := uint(0); i < b.failures && delay < 30*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	b.failures++
+	return delay
+}
+
+func isCleanRemoteClose(err error) bool {
+	var http3Err *http3.Error
+	if errors.As(err, &http3Err) {
+		return http3Err.Remote && http3Err.ErrorCode == http3.ErrCodeNoError
+	}
+	var applicationErr *quic.ApplicationError
+	if errors.As(err, &applicationErr) {
+		return applicationErr.Remote && applicationErr.ErrorCode == quic.ApplicationErrorCode(http3.ErrCodeNoError)
+	}
+	var transportErr *quic.TransportError
+	return errors.As(err, &transportErr) && transportErr.Remote && transportErr.ErrorCode == quic.NoError
+}
+
+func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte, pool *tunBufferPool) (time.Duration, error) {
+	t.stats.sessionsStarted.Add(1)
 	if len(t.registration.Config.Peers) == 0 {
-		return errors.New("registration has no MASQUE peer")
+		return 0, errors.New("registration has no MASQUE peer")
 	}
 	peer := t.registration.Config.Peers[0]
 	peerKey, err := parseEndpointKey(peer.PublicKey)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	certDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{SerialNumber: big.NewInt(0), NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour)}, &x509.Certificate{}, &t.privateKey.PublicKey, t.privateKey)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{certDER}, PrivateKey: t.privateKey}},
@@ -761,22 +798,26 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 	}
 	endpointIP := net.ParseIP(host)
 	if endpointIP == nil {
-		return fmt.Errorf("invalid MASQUE endpoint %q", peer.Endpoint.V4)
+		return 0, fmt.Errorf("invalid MASQUE endpoint %q", peer.Endpoint.V4)
 	}
 	endpoint := &net.UDPAddr{IP: endpointIP, Port: 443}
 	tunnelType := "masque"
-	ipConn, response, closeSession, err := dialHTTP3(ctx, tlsConfig, endpoint, t.cfg.KeepaliveEvery, t.cfg.MTU)
+	ipConn, response, closeSession, err := dialHTTP3(ctx, tlsConfig, endpoint, t.cfg.KeepaliveEvery, t.cfg.MTU, t.stats)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer closeSession()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("CONNECT-IP returned %s", response.Status)
+		return 0, fmt.Errorf("CONNECT-IP returned %s", response.Status)
 	}
 	if err := t.reportDeviceState(ctx, "Connected", tunnelType); err != nil {
-		return err
+		return 0, err
 	}
+	connectedAt := time.Now()
 	t.readyOnce.Do(func() { close(t.ready) })
+	t.stats.sessionsConnected.Add(1)
+	t.stats.sessionActive.Store(true)
+	defer t.stats.sessionActive.Store(false)
 	log.Infof("cloudflare-mesh: native CONNECT-IP connected over %s to %s", tunnelType, endpoint)
 	sessionCtx, cancelSession := context.WithCancel(ctx)
 	errCh := make(chan error, 3)
@@ -790,6 +831,7 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 				errCh <- sessionCtx.Err()
 				return
 			case packet, ok := <-outbound:
+				t.stats.outboundQueueDepth.Store(uint64(len(outbound)))
 				if !ok {
 					errCh <- io.EOF
 					return
@@ -798,8 +840,18 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 				// returns, and the ICMP reply is freshly composed, so the
 				// buffer is free again the moment this call comes back.
 				icmp, err := ipConn.WritePacketBuffer(packet, tunHeadroom, len(packet)-tunHeadroom)
+				sent := err == nil && len(icmp) == 0
 				if err == nil && len(icmp) > 0 {
+					t.stats.icmpTooLarge.Add(1)
+					t.stats.tunWriteCalls.Add(1)
 					_, err = t.iface.Write(icmp)
+					if err == nil {
+						t.stats.tunWritePackets.Add(1)
+					}
+				}
+				if sent {
+					t.stats.txPackets.Add(1)
+					t.stats.txBytes.Add(uint64(len(packet) - tunHeadroom))
 				}
 				pool.put(packet)
 				if err != nil {
@@ -831,20 +883,24 @@ func (t *nativeTransport) runSession(ctx context.Context, outbound <-chan []byte
 				errCh <- err
 				return
 			}
+			t.stats.tunWriteCalls.Add(1)
 			if _, err := t.iface.Write(packet); err != nil {
 				errCh <- err
 				return
 			}
+			t.stats.tunWritePackets.Add(1)
+			t.stats.rxPackets.Add(1)
+			t.stats.rxBytes.Add(uint64(len(packet)))
 		}
 	}()
 	sessionErr := <-errCh
 	cancelSession()
 	_ = ipConn.Close()
 	pumps.Wait()
-	return sessionErr
+	return time.Since(connectedAt), sessionErr
 }
 
-func dialHTTP3(ctx context.Context, tlsConfig *tls.Config, endpoint *net.UDPAddr, keepalive time.Duration, mtu int) (*connectip.Conn, *http.Response, func(), error) {
+func dialHTTP3(ctx context.Context, tlsConfig *tls.Config, endpoint *net.UDPAddr, keepalive time.Duration, mtu int, stats *transportStats) (*connectip.Conn, *http.Response, func(), error) {
 	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
 		return nil, nil, func() {}, err
@@ -860,10 +916,22 @@ func dialHTTP3(ctx context.Context, tlsConfig *tls.Config, endpoint *net.UDPAddr
 		_ = udpConn.Close()
 		return nil, nil, func() {}, err
 	}
+	if stats != nil {
+		stats.setQUICConn(qconn)
+	}
 	h3 := &http3.Transport{EnableDatagrams: true, DisableCompression: true, AdditionalSettings: map[uint64]uint64{0x276: 1}}
 	hconn := h3.NewClientConn(qconn)
+	var internalStats *quicHTTP3DropStatsProvider
+	if stats != nil {
+		internalStats = &quicHTTP3DropStatsProvider{quic: qconn, http3: hconn}
+		stats.setInternalDropStatsProvider(internalStats)
+	}
 	ipConn, response, err := connectip.Dial(ctx, hconn, uritemplate.MustNew(connectURI), "cf-connect-ip", http.Header{"User-Agent": []string{""}}, true)
 	if err != nil {
+		if stats != nil {
+			stats.clearQUICConn(qconn)
+			stats.clearInternalDropStatsProvider(internalStats)
+		}
 		_ = h3.Close()
 		_ = qconn.CloseWithError(0, "connect-ip dial failed")
 		_ = qtr.Close()
@@ -871,6 +939,10 @@ func dialHTTP3(ctx context.Context, tlsConfig *tls.Config, endpoint *net.UDPAddr
 		return nil, nil, func() {}, err
 	}
 	cleanup := func() {
+		if stats != nil {
+			stats.clearQUICConn(qconn)
+			stats.clearInternalDropStatsProvider(internalStats)
+		}
 		_ = ipConn.Close()
 		_ = h3.Close()
 		_ = qconn.CloseWithError(0, "reconnect")

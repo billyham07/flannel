@@ -4,6 +4,15 @@ go 1.25.9
 
 // replace github.com/dgrijalva/jwt-go => github.com/golang-jwt/jwt/v4 v4.2.0
 
+// Keep the v0.60.0 API while batching equal-sized short QUIC packets with UDP
+// GSO, exposing receive queue counters, and composing HTTP/3 DATAGRAM framing
+// in caller-provided headroom.
+replace github.com/quic-go/quic-go => github.com/billyham07/quic-go v0.60.1-0.20260823165236-0638d5f720a6
+
+// Forward caller headroom from CONNECT-IP to quic-go's optional buffered
+// DATAGRAM API. Older HTTP/3 implementations continue to use SendDatagram.
+replace github.com/Diniboy1123/connect-ip-go => github.com/billyham07/connect-ip-go v0.0.0-20260823162011-4c7d0e50c1bb
+
 require (
 	github.com/Diniboy1123/connect-ip-go v0.0.0-20260613064811-66cba32d7d33
 	github.com/Microsoft/hcsshim v0.14.1

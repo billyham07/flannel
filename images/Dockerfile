@@ -9,7 +9,7 @@ FROM --platform=$TARGETPLATFORM ${WRAPPER_IMAGE} AS wrapper
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS base-builder
 # copy xx scripts to your build stage
 COPY --from=xx / /
-RUN apk add bash file make clang lld patch linux-headers
+RUN apk add bash file make git clang lld patch linux-headers
 ARG TARGETPLATFORM
 RUN set -x && \
     xx-apk --no-cache add gcc musl-dev 

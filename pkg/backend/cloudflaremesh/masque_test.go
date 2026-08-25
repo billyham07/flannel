@@ -35,6 +35,8 @@ import (
 	"time"
 
 	meshapi "github.com/flannel-io/flannel/pkg/cloudflaremesh"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 func TestConnectorAccountID(t *testing.T) {
@@ -242,5 +244,59 @@ func TestConnectorChangeReenrollsInsteadOfReturningReadError(t *testing.T) {
 				t.Fatalf("state replacement did not enter enrollment path: %v", err)
 			}
 		})
+	}
+}
+
+func TestReconnectBackoffImmediatelyReplacesHealthySession(t *testing.T) {
+	backoff := reconnectBackoff{}
+	failure := errors.New("dial failed")
+	if got := backoff.nextDelay(time.Second, failure); got != time.Second {
+		t.Fatalf("first failed session delay = %s, want 1s", got)
+	}
+	if got := backoff.nextDelay(time.Second, failure); got != 2*time.Second {
+		t.Fatalf("second failed session delay = %s, want 2s", got)
+	}
+	if got := backoff.nextDelay(sessionHealthyAfter, failure); got != 0 {
+		t.Fatalf("healthy session replacement delay = %s, want immediate", got)
+	}
+	if got := backoff.nextDelay(time.Second, failure); got != time.Second {
+		t.Fatalf("failed immediate replacement delay = %s, want reset 1s", got)
+	}
+}
+
+func TestReconnectBackoffImmediatelyReplacesCleanRemoteClose(t *testing.T) {
+	backoff := reconnectBackoff{failures: 5}
+	clean := &quic.ApplicationError{
+		Remote: true, ErrorCode: quic.ApplicationErrorCode(http3.ErrCodeNoError),
+	}
+	wrapped := errors.New("receive CONNECT-IP datagram: " + clean.Error())
+	if isCleanRemoteClose(wrapped) {
+		t.Fatal("string-only lookalike must not be classified as a clean remote close")
+	}
+	if !isCleanRemoteClose(clean) {
+		t.Fatal("remote HTTP/3 NO_ERROR was not classified as a clean close")
+	}
+	if !isCleanRemoteClose(&http3.Error{Remote: true, ErrorCode: http3.ErrCodeNoError}) {
+		t.Fatal("translated remote HTTP/3 NO_ERROR was not classified as a clean close")
+	}
+	if got := backoff.nextDelay(time.Second, clean); got != 0 {
+		t.Fatalf("clean remote close delay = %s, want immediate", got)
+	}
+	if got := backoff.nextDelay(time.Second, errors.New("replacement failed")); got != time.Second {
+		t.Fatalf("failed immediate replacement delay = %s, want 1s", got)
+	}
+	local := &quic.ApplicationError{Remote: false, ErrorCode: quic.ApplicationErrorCode(http3.ErrCodeNoError)}
+	if isCleanRemoteClose(local) {
+		t.Fatal("local close must not be classified as a clean remote close")
+	}
+}
+
+func TestReconnectBackoffCapsAtThirtySeconds(t *testing.T) {
+	backoff := reconnectBackoff{}
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second}
+	for i, expected := range want {
+		if got := backoff.nextDelay(0, errors.New("failed")); got != expected {
+			t.Fatalf("failure %d delay = %s, want %s", i+1, got, expected)
+		}
 	}
 }

@@ -17,11 +17,11 @@ package cloudflaremesh
 import "context"
 
 const (
-	// tunHeadroom is the one byte of slack reserved at the front of every
-	// buffer. It is exactly the length of the CONNECT-IP context ID varint,
-	// which lets WritePacketBuffer prepend the header in place instead of
-	// composing a fresh datagram, so the packet payload is never copied.
-	tunHeadroom = 1
+	// tunHeadroom reserves the one-byte CONNECT-IP context ID plus the largest
+	// possible eight-byte HTTP/3 quarter stream ID. Both layers prepend their
+	// framing into this slack, so neither allocates or copies the IP payload.
+	// Only the bytes actually used for the stream ID are sent.
+	tunHeadroom = 1 + 8
 
 	// outboundQueueDepth is how many read packets may wait for the MASQUE
 	// writer. It absorbs a stalled QUIC send without dropping traffic, and
@@ -47,14 +47,20 @@ const (
 // Every buffer carries tunHeadroom bytes of slack at the front so the writer
 // keeps the zero-copy WritePacketBuffer path.
 type tunBufferPool struct {
-	free chan []byte
-	size int
+	free  chan []byte
+	size  int
+	stats *transportStats
 }
 
 func newTUNBufferPool(count, mtu int) *tunBufferPool {
+	return newTUNBufferPoolWithStats(count, mtu, nil)
+}
+
+func newTUNBufferPoolWithStats(count, mtu int, stats *transportStats) *tunBufferPool {
 	pool := &tunBufferPool{
-		free: make(chan []byte, count),
-		size: mtu + tunHeadroom,
+		free:  make(chan []byte, count),
+		size:  mtu + tunHeadroom,
+		stats: stats,
 	}
 	for i := 0; i < count; i++ {
 		pool.free <- make([]byte, pool.size)
@@ -66,6 +72,14 @@ func newTUNBufferPool(count, mtu int) *tunBufferPool {
 // cancelled. The returned buffer is full length: the caller reads the packet
 // into buf[tunHeadroom:] and reslices to the bytes it actually read.
 func (p *tunBufferPool) get(ctx context.Context) ([]byte, bool) {
+	select {
+	case buf := <-p.free:
+		return buf[:p.size], true
+	default:
+		if p.stats != nil {
+			p.stats.poolExhaustions.Add(1)
+		}
+	}
 	select {
 	case buf := <-p.free:
 		return buf[:p.size], true
@@ -84,5 +98,31 @@ func (p *tunBufferPool) put(buf []byte) {
 	select {
 	case p.free <- buf[:p.size]:
 	default:
+	}
+}
+
+// enqueueOutbound records only actual contention. The fast path is one
+// non-blocking channel send and atomics; if the queue is full, the reader
+// blocks (preserving packets) and outboundQueueWaits identifies that pressure.
+func enqueueOutbound(ctx context.Context, outbound chan<- []byte, buf []byte, stats *transportStats) bool {
+	select {
+	case outbound <- buf:
+		if stats != nil {
+			stats.observeOutboundDepth(len(outbound))
+		}
+		return true
+	default:
+		if stats != nil {
+			stats.outboundQueueWaits.Add(1)
+		}
+	}
+	select {
+	case outbound <- buf:
+		if stats != nil {
+			stats.observeOutboundDepth(len(outbound))
+		}
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
